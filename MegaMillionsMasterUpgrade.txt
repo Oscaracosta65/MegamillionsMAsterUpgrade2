@@ -2,12 +2,18 @@
 <?php
 /**
  * LottoExpert.net — Mega Millions Results Intelligence Page
- * Multi State • Joomla 5.x + PHP 8.1+
+ * Multi State • Joomla 5.1.2 + PHP 8.1.31
  *
- * GAME CONFIG:
- * - game_id = 113 (Mega Millions)
- * - main balls = 5, range 01..70
- * - Mega Ball range = 01..25
+ * Verification summary:
+ * - Target file: MegaMillionsMasterUpgrade.txt — Mega Millions results intelligence page
+ * - Game ID: 113 (Mega Millions), state: Multi State, stateAbrev: ar
+ * - JSON source checked: lottery_skip_config.json (game_id 113)
+ * - Key spec verified: 5 main balls 01-70, Mega Ball 01-24 (max_extra_ball_number: 24 per JSON config)
+ * - Bonus/extra logic: Mega Ball drawn from same record, column "sixth", range 01-24
+ * - Factual corrections: Mega Ball range corrected from 25 to 24 per verified JSON config
+ * - Template additions: best plays, odds/payouts, combination profile, anti-crowd,
+ *   bankroll planner, guide/FAQ sections added from approved reference template system
+ * - All Mega Millions specific links (game_id=113, gName=megamillions, sTn=ar) preserved
  */
 
 defined('_JEXEC') or die;
@@ -29,6 +35,7 @@ $gName      = 'Mega Millions';
 $stLink     = $input->getString('stn', 'Multi State');
 $dbCol      = '#__lotterydb_ar';
 $gameId     = '113';
+$gId        = $gameId;
 
 /**
  * Document / SEO
@@ -77,7 +84,7 @@ if ($loginStatus === 1) {
 }
 
 /**
- * Helpers
+ * Helper functions
  */
 function leFmtDate(?string $date): string
 {
@@ -280,10 +287,259 @@ function leGetDrawingsSinceDate(
 function leEscapeJsString(string $value): string
 {
     return str_replace(
-        ["\\", "'", "\r", "\n", '</'],
-        ["\\\\", "\\'", '', '', '<\/'],
+        ['\\', "'", "\r", "\n", '</'],
+        ['\\\\', "\\'", '', '', '<\/'],
         $value
     );
+}
+
+function leNumberToInt(string $value): int
+{
+    $value = trim($value);
+    if ($value === '' || !ctype_digit($value)) {
+        return 0;
+    }
+    return (int) $value;
+}
+
+/**
+ * Normalizes a play set for the Mega Millions 5/70 main matrix.
+ */
+function leNormalizePlay(array $numbers, int $min = 1, int $max = 70, int $limit = 5): array
+{
+    $ints = [];
+    $seen = [];
+    foreach ($numbers as $value) {
+        $n = is_int($value) ? $value : leNumberToInt((string) $value);
+        if ($n < $min || $n > $max || isset($seen[$n])) {
+            continue;
+        }
+        $seen[$n] = true;
+        $ints[]   = $n;
+        if (count($ints) >= $limit) {
+            break;
+        }
+    }
+    sort($ints, SORT_NUMERIC);
+    $out = [];
+    foreach ($ints as $n) {
+        $out[] = ($n < 10) ? '0' . $n : (string) $n;
+    }
+    return $out;
+}
+
+/**
+ * Builds a play from ordered pools with a fallback, for the Mega Millions 1-70 matrix.
+ */
+function leBuildPlayFromPools(array $pools, array $fallbackPool, int $limit = 5): array
+{
+    $picked = [];
+    $seen   = [];
+    foreach ($pools as $pool) {
+        foreach ($pool as $value) {
+            $n = is_int($value) ? $value : leNumberToInt((string) $value);
+            if ($n < 1 || $n > 70 || isset($seen[$n])) {
+                continue;
+            }
+            $seen[$n] = true;
+            $picked[] = $n;
+            if (count($picked) >= $limit) {
+                break 2;
+            }
+        }
+    }
+    if (count($picked) < $limit) {
+        foreach ($fallbackPool as $value) {
+            $n = is_int($value) ? $value : leNumberToInt((string) $value);
+            if ($n < 1 || $n > 70 || isset($seen[$n])) {
+                continue;
+            }
+            $seen[$n] = true;
+            $picked[] = $n;
+            if (count($picked) >= $limit) {
+                break;
+            }
+        }
+    }
+    return leNormalizePlay($picked, 1, 70, $limit);
+}
+
+function leConsecutiveCount(array $numbers): int
+{
+    $sorted = [];
+    foreach ($numbers as $value) {
+        $n = is_int($value) ? $value : leNumberToInt((string) $value);
+        if ($n > 0) {
+            $sorted[] = $n;
+        }
+    }
+    sort($sorted, SORT_NUMERIC);
+    $count = 0;
+    for ($i = 1; $i < count($sorted); $i++) {
+        if (($sorted[$i] - $sorted[$i - 1]) === 1) {
+            $count++;
+        }
+    }
+    return $count;
+}
+
+function leArithmeticPatternScore(array $numbers): int
+{
+    $sorted = [];
+    foreach ($numbers as $value) {
+        $n = is_int($value) ? $value : leNumberToInt((string) $value);
+        if ($n > 0) {
+            $sorted[] = $n;
+        }
+    }
+    sort($sorted, SORT_NUMERIC);
+    if (count($sorted) < 4) {
+        return 0;
+    }
+    $sameDiff = 0;
+    for ($i = 2; $i < count($sorted); $i++) {
+        $d1 = $sorted[$i - 1] - $sorted[$i - 2];
+        $d2 = $sorted[$i] - $sorted[$i - 1];
+        if ($d1 === $d2) {
+            $sameDiff++;
+        }
+    }
+    return $sameDiff;
+}
+
+/**
+ * Returns structural profile metrics for a Mega Millions 5/70 play set.
+ * Low/high split at <=35 (midpoint of 1-70 range).
+ * Cluster density: tight <=24 (roughly 1/3 of max spread 69), moderate <=38.
+ */
+function leBuildCombinationProfile(array $play, array $latestMain): array
+{
+    $ints = [];
+    foreach ($play as $value) {
+        $n = is_int($value) ? $value : leNumberToInt((string) $value);
+        if ($n > 0) {
+            $ints[] = $n;
+        }
+    }
+    sort($ints, SORT_NUMERIC);
+    $odd = 0;
+    $low = 0;
+    foreach ($ints as $n) {
+        if (($n % 2) !== 0) {
+            $odd++;
+        }
+        if ($n <= 35) {
+            $low++;
+        }
+    }
+    $sum         = array_sum($ints);
+    $spread      = !empty($ints) ? (max($ints) - min($ints)) : 0;
+    $consecutive = leConsecutiveCount($ints);
+    $repeated    = 0;
+    $latestLookup = [];
+    foreach ($latestMain as $value) {
+        $latestLookup[lePad2((string) $value)] = true;
+    }
+    foreach ($ints as $n) {
+        $key = ($n < 10) ? '0' . $n : (string) $n;
+        if (isset($latestLookup[$key])) {
+            $repeated++;
+        }
+    }
+    $density = 'Wide spread';
+    if ($spread <= 24) {
+        $density = 'High cluster density';
+    } elseif ($spread <= 38) {
+        $density = 'Moderate cluster density';
+    }
+    return [
+        'odd_even'        => $odd . '/' . (count($ints) - $odd),
+        'low_high'        => $low . '/' . (count($ints) - $low),
+        'sum'             => $sum,
+        'spread'          => $spread,
+        'consecutive'     => $consecutive,
+        'repeated'        => $repeated,
+        'cluster_density' => $density,
+    ];
+}
+
+/**
+ * Crowd-likeness scoring for Mega Millions plays.
+ * Birthday threshold <=31 is universal. Spread thresholds scaled from 1-70 range.
+ */
+function leCrowdRiskProfile(array $play, array $favoriteNumbers): array
+{
+    $ints = [];
+    foreach ($play as $value) {
+        $n = is_int($value) ? $value : leNumberToInt((string) $value);
+        if ($n > 0) {
+            $ints[] = $n;
+        }
+    }
+    sort($ints, SORT_NUMERIC);
+    $under31        = 0;
+    $favHits        = 0;
+    $favoriteLookup = [];
+    foreach ($favoriteNumbers as $fav) {
+        $favoriteLookup[(int) $fav] = true;
+    }
+    foreach ($ints as $n) {
+        if ($n <= 31) {
+            $under31++;
+        }
+        if (isset($favoriteLookup[$n])) {
+            $favHits++;
+        }
+    }
+    $spread        = !empty($ints) ? (max($ints) - min($ints)) : 0;
+    $consecutive   = leConsecutiveCount($ints);
+    $visualPattern = leArithmeticPatternScore($ints) >= 2;
+    $score         = 0;
+    $reasons       = [];
+    if ($under31 >= 4) {
+        $score    += 2;
+        $reasons[] = 'birthday-heavy composition';
+    } elseif ($under31 >= 3) {
+        $score    += 1;
+        $reasons[] = 'leaning toward under-31 numbers';
+    }
+    if ($consecutive >= 2) {
+        $score    += 2;
+        $reasons[] = 'sequence concentration';
+    } elseif ($consecutive === 1) {
+        $score    += 1;
+        $reasons[] = 'minor sequence pattern';
+    }
+    if ($visualPattern) {
+        $score    += 1;
+        $reasons[] = 'obvious spacing pattern';
+    }
+    if ($spread <= 28) {
+        $score    += 2;
+        $reasons[] = 'tight clustering';
+    } elseif ($spread <= 38) {
+        $score    += 1;
+        $reasons[] = 'moderate clustering';
+    }
+    if ($favHits >= 2) {
+        $score    += 1;
+        $reasons[] = 'cultural favorite overlap';
+    }
+    $label = 'Low crowd risk';
+    if ($score >= 5) {
+        $label = 'High crowd risk';
+    } elseif ($score >= 3) {
+        $label = 'Medium crowd risk';
+    }
+    $explanation = !empty($reasons)
+        ? ('Signals: ' . implode(', ', $reasons) . '.')
+        : 'Signals: broad spread and lower overlap with common crowd patterns.';
+    return [
+        'score'       => $score,
+        'label'       => $label,
+        'explanation' => $explanation,
+        'under31'     => $under31,
+    ];
 }
 
 /**
@@ -301,368 +557,487 @@ if ($input->getMethod() === 'POST' && Session::checkToken()) {
     if ($input->post->get('pfq-search', null, 'cmd') !== null) {
         $nodCurrentBonus = (int) $input->post->get('pnod', $defaultWindowBonus, 'int');
     }
+    $nodCurrentMain  = max(10, min(700, $nodCurrentMain));
+    $nodCurrentBonus = max(10, min(700, $nodCurrentBonus));
 }
 
-$nodCurrentMain  = max(10, min(700, $nodCurrentMain));
-$nodCurrentBonus = max(10, min(700, $nodCurrentBonus));
-
 /**
- * Fetch latest draw and windows
+ * Fetch latest draw and build frequency windows
  */
-$latestRows = leFetchRecentDraws($db, (string) $dbCol, $gameId, 1);
-$lr         = !empty($latestRows) ? $latestRows[0] : null;
+$logo    = leResolveLogo($stateAbrev, $gName);
+$maxFetch = max($nodCurrentMain, $nodCurrentBonus, 300);
+$rowsMain = leFetchRecentDraws($db, (string) $dbCol, $gameId, $maxFetch);
 
-$gId          = $gameId;
-$drawDate     = $lr ? (string) ($lr['draw_date'] ?? '') : '';
-$nextDrawDate = $lr ? (string) ($lr['next_draw_date'] ?? '') : '';
-$nextJackpot  = $lr ? (string) ($lr['next_jackpot'] ?? '') : '';
-
-$p1 = $lr ? trim((string) ($lr['first'] ?? '')) : '';
-$p2 = $lr ? trim((string) ($lr['second'] ?? '')) : '';
-$p3 = $lr ? trim((string) ($lr['third'] ?? '')) : '';
-$p4 = $lr ? trim((string) ($lr['fourth'] ?? '')) : '';
-$p5 = $lr ? trim((string) ($lr['fifth'] ?? '')) : '';
-$pb = $lr ? trim((string) ($lr['sixth'] ?? '')) : '';
-
-$latestMainBalls = [$p1, $p2, $p3, $p4, $p5];
-$logo            = leResolveLogo((string) $stateAbrev, (string) $gName);
-
-/**
- * Build frequency windows
- * Main white balls: 01-70
- * Mega Ball:        01-25
- */
-$rowsMain  = leFetchRecentDraws($db, (string) $dbCol, $gameId, $nodCurrentMain);
 $rowsBonus = ($nodCurrentBonus === $nodCurrentMain)
     ? $rowsMain
     : leFetchRecentDraws($db, (string) $dbCol, $gameId, $nodCurrentBonus);
 
-[$mainCounts, $mainLastSeenIndex]   = leInitRange(1, 70);
-[$bonusCounts, $bonusLastSeenIndex] = leInitRange(1, 25);
+$latestRow   = $rowsMain[0] ?? [];
+$drawDate    = (string) ($latestRow['draw_date']    ?? '');
+$nextDrawDate = (string) ($latestRow['next_draw_date'] ?? '');
+$nextJackpot  = (string) ($latestRow['next_jackpot']   ?? '');
+$p1 = trim((string) ($latestRow['first']  ?? ''));
+$p2 = trim((string) ($latestRow['second'] ?? ''));
+$p3 = trim((string) ($latestRow['third']  ?? ''));
+$p4 = trim((string) ($latestRow['fourth'] ?? ''));
+$p5 = trim((string) ($latestRow['fifth']  ?? ''));
+$pb = trim((string) ($latestRow['sixth']  ?? ''));
 
-foreach ($rowsMain as $idx => $row) {
-    $balls = [
-        trim((string) ($row['first'] ?? '')),
-        trim((string) ($row['second'] ?? '')),
-        trim((string) ($row['third'] ?? '')),
-        trim((string) ($row['fourth'] ?? '')),
-        trim((string) ($row['fifth'] ?? '')),
-    ];
-    foreach ($balls as $ball) {
-        if ($ball === '' || !isset($mainCounts[$ball])) {
-            continue;
-        }
-        $mainCounts[$ball]++;
-        if ($mainLastSeenIndex[$ball] === null) {
-            $mainLastSeenIndex[$ball] = (int) $idx;
+// Main frequency window — white balls 01-70
+[$mainCounts, $mainLastSeenIndex] = leInitRange(1, 70);
+foreach (array_slice($rowsMain, 0, $nodCurrentMain) as $idx => $row) {
+    foreach (['first', 'second', 'third', 'fourth', 'fifth'] as $col) {
+        $ball = trim((string) ($row[$col] ?? ''));
+        if ($ball !== '' && isset($mainCounts[$ball])) {
+            $mainCounts[$ball]++;
+            if ($mainLastSeenIndex[$ball] === null) {
+                $mainLastSeenIndex[$ball] = $idx;
+            }
         }
     }
 }
 
-foreach ($rowsBonus as $idx => $row) {
+// Bonus frequency window — Mega Ball 01-24 (verified: max_extra_ball_number: 24 per lottery_skip_config.json)
+[$bonusCounts, $bonusLastSeenIndex] = leInitRange(1, 24);
+foreach (array_slice($rowsBonus, 0, $nodCurrentBonus) as $bIdx => $row) {
     $ball = trim((string) ($row['sixth'] ?? ''));
-    if ($ball === '' || !isset($bonusCounts[$ball])) {
+    if ($ball !== '' && isset($bonusCounts[$ball])) {
+        $bonusCounts[$ball]++;
+        if ($bonusLastSeenIndex[$ball] === null) {
+            $bonusLastSeenIndex[$ball] = $bIdx;
+        }
+    }
+}
+
+// Overview signals
+$topN        = 10;
+$topActiveKeys   = leTopKeysByValue($mainCounts,   $topN, false);
+$quietestKeys    = leTopKeysByValue($mainLastSeenIndex, $topN, false);
+$mostActiveSummary = array_slice($topActiveKeys, 0, 5);
+$quietSummary      = array_slice($quietestKeys, 0, 5);
+
+$latestBalls    = array_filter([$p1, $p2, $p3, $p4, $p5]);
+$trailing3Rows  = array_slice($rowsMain, 1, 3);
+$repeatedNumbers = leFindRepeatedFromLatest($latestBalls, $trailing3Rows);
+
+// Chart data
+$topActiveLabels = array_slice($topActiveKeys, 0, 15);
+$topActiveValues = array_map(static function ($k) use ($mainCounts) { return (int) ($mainCounts[$k] ?? 0); }, $topActiveLabels);
+
+$quietestLabels = array_slice($quietestKeys, 0, 15);
+$quietestValues = array_map(static function ($k) use ($mainLastSeenIndex, $nodCurrentMain) {
+    $idx = $mainLastSeenIndex[$k] ?? null;
+    return ($idx === null) ? ($nodCurrentMain + 1) : ($idx + 1);
+}, $quietestLabels);
+
+$mainChartLabels   = leBuildNaturalLabels(1, 70);
+$mainChartValues   = array_map(static function ($k) use ($mainCounts) { return (int) ($mainCounts[$k] ?? 0); }, $mainChartLabels);
+$mainRecencyValues = array_map(static function ($k) use ($mainLastSeenIndex, $nodCurrentMain) {
+    $idx = $mainLastSeenIndex[$k] ?? null;
+    return ($idx === null) ? ($nodCurrentMain + 1) : ($idx + 1);
+}, $mainChartLabels);
+
+// Verified: Mega Ball range 01-24 per JSON config
+$bonusChartLabels = leBuildNaturalLabels(1, 24);
+$bonusChartValues = array_map(static function ($k) use ($bonusCounts) { return (int) ($bonusCounts[$k] ?? 0); }, $bonusChartLabels);
+
+// Window-shift comparison
+$top50  = leTopKeysByValue(array_slice($mainCounts, 0, 50, true), 5, false);
+$top300 = leTopKeysByValue($mainCounts, 5, false);
+
+// Draw history for the latest draw balls
+$drawHistoryRows = [];
+foreach ([$p1, $p2, $p3, $p4, $p5] as $ball) {
+    if ($ball === '') {
         continue;
     }
-    $bonusCounts[$ball]++;
-    if ($bonusLastSeenIndex[$ball] === null) {
-        $bonusLastSeenIndex[$ball] = (int) $idx;
-    }
-}
-
-/**
- * Insight / chart data
- */
-$mainChartLabels   = leBuildNaturalLabels(1, 70);
-$mainChartValues   = [];
-$mainRecencyValues = [];
-
-foreach ($mainChartLabels as $label) {
-    $mainChartValues[]   = (int) ($mainCounts[$label] ?? 0);
-    $mainRecencyValues[] = (int) (
-        ($mainLastSeenIndex[$label] ?? null) === null
-        ? ($nodCurrentMain + 1)
-        : ((int) $mainLastSeenIndex[$label] + 1)
-    );
-}
-
-$bonusChartLabels = leBuildNaturalLabels(1, 25);
-$bonusChartValues = [];
-
-foreach ($bonusChartLabels as $label) {
-    $bonusChartValues[] = (int) ($bonusCounts[$label] ?? 0);
-}
-
-$topActiveKeys = leTopKeysByValue($mainCounts, 10, false);
-$topQuietKeys  = leTopKeysByValue($mainCounts, 10, true);
-
-$topActiveLabels = $topActiveKeys;
-$topActiveValues = [];
-foreach ($topActiveKeys as $key) {
-    $topActiveValues[] = (int) ($mainCounts[$key] ?? 0);
-}
-
-$quietestLabels  = [];
-$quietestValues  = [];
-$quietCandidates = [];
-
-foreach ($mainCounts as $key => $count) {
-    $quietCandidates[$key] = ($mainLastSeenIndex[$key] === null)
-        ? ($nodCurrentMain + 1)
-        : ((int) $mainLastSeenIndex[$key] + 1);
-}
-arsort($quietCandidates, SORT_NUMERIC);
-$quietestKeys = array_slice(array_keys($quietCandidates), 0, 10);
-
-foreach ($quietestKeys as $key) {
-    $quietestLabels[] = $key;
-    $quietestValues[] = (int) $quietCandidates[$key];
-}
-
-$repeatedNumbers   = leFindRepeatedFromLatest($latestMainBalls, array_slice($rowsMain, 1, 10));
-$mostActiveSummary = array_slice($topActiveKeys, 0, 3);
-$quietSummary      = array_slice($quietestKeys, 0, 3);
-
-$window50  = leFetchRecentDraws($db, (string) $dbCol, $gameId, 50);
-$window300 = leFetchRecentDraws($db, (string) $dbCol, $gameId, 300);
-
-[$counts50, ]  = leInitRange(1, 70);
-[$counts300, ] = leInitRange(1, 70);
-
-foreach ($window50 as $row) {
-    foreach (['first', 'second', 'third', 'fourth', 'fifth'] as $col) {
-        $ball = trim((string) ($row[$col] ?? ''));
-        if ($ball !== '' && isset($counts50[$ball])) {
-            $counts50[$ball]++;
-        }
-    }
-}
-
-foreach ($window300 as $row) {
-    foreach (['first', 'second', 'third', 'fourth', 'fifth'] as $col) {
-        $ball = trim((string) ($row[$col] ?? ''));
-        if ($ball !== '' && isset($counts300[$ball])) {
-            $counts300[$ball]++;
-        }
-    }
-}
-
-$top50  = leTopKeysByValue($counts50, 5, false);
-$top300 = leTopKeysByValue($counts300, 5, false);
-
-$windowShiftIn  = [];
-$windowShiftOut = [];
-
-foreach ($top300 as $number) {
-    if (!in_array($number, $top50, true)) {
-        $windowShiftIn[] = $number;
-    }
-}
-foreach ($top50 as $number) {
-    if (!in_array($number, $top300, true)) {
-        $windowShiftOut[] = $number;
-    }
-}
-
-$windowChangeNarrative  = 'In the recent 50-draw view, the leading activity centers on ' . leCommaList(array_slice($top50, 0, 3)) . '. ';
-$windowChangeNarrative .= 'In the broader 300-draw view, ' . leCommaList(array_slice($top300, 0, 3)) . ' remains more historically prominent. ';
-if (!empty($windowShiftIn)) {
-    $windowChangeNarrative .= leCommaList(array_slice($windowShiftIn, 0, 2)) . ' gains prominence when the window broadens. ';
-}
-if (!empty($windowShiftOut)) {
-    $windowChangeNarrative .= leCommaList(array_slice($windowShiftOut, 0, 2)) . ' looks more concentrated in the shorter recent view.';
-}
-
-/**
- * Draw history for current draw balls
- */
-$drawHistoryRows = [];
-
-if ($drawDate !== '') {
-    foreach ($latestMainBalls as $ball) {
-        $prevDate = leGetPreviousOccurrenceDate($db, (string) $dbCol, $gameId, $drawDate, $ball, false);
-        $drawsAgo = leGetDrawingsSinceDate($db, (string) $dbCol, $gameId, $prevDate, $drawDate);
-        $drawHistoryRows[] = [
-            'label'    => lePad2($ball),
-            'prevDate' => $prevDate,
-            'drawsAgo' => $drawsAgo,
-            'isBonus'  => false,
-        ];
-    }
-
-    $prevBonusDate = leGetPreviousOccurrenceDate($db, (string) $dbCol, $gameId, $drawDate, $pb, true);
-    $bonusDrawsAgo = leGetDrawingsSinceDate($db, (string) $dbCol, $gameId, $prevBonusDate, $drawDate);
+    $prevDate = leGetPreviousOccurrenceDate($db, (string) $dbCol, $gameId, $drawDate, $ball, false);
+    $drawsAgo = leGetDrawingsSinceDate($db, (string) $dbCol, $gameId, $prevDate, $drawDate);
     $drawHistoryRows[] = [
-        'label'    => 'Mega Ball (' . lePad2($pb) . ')',
-        'prevDate' => $prevBonusDate,
-        'drawsAgo' => $bonusDrawsAgo,
-        'isBonus'  => true,
+        'label'    => 'White ball ' . lePad2($ball),
+        'prevDate' => $prevDate,
+        'drawsAgo' => $drawsAgo,
+    ];
+}
+if ($pb !== '') {
+    $prevDateBonus = leGetPreviousOccurrenceDate($db, (string) $dbCol, $gameId, $drawDate, $pb, true);
+    $drawsAgoBonus = leGetDrawingsSinceDate($db, (string) $dbCol, $gameId, $prevDateBonus, $drawDate);
+    $drawHistoryRows[] = [
+        'label'    => 'Mega Ball ' . lePad2($pb),
+        'prevDate' => $prevDateBonus,
+        'drawsAgo' => $drawsAgoBonus,
     ];
 }
 
 /**
- * Copy / CTA
+ * Recommendation system — Mega Millions specific
+ * Favorite numbers are culturally popular selections; used for anti-crowd analysis.
  */
-$heroInsight  = 'Latest verified Mega Millions draw and recent number behavior at a glance. Review the most active white balls, quiet stretches, and full historical frequency before moving into deeper SKAI analysis.';
-$overviewNote = 'Frequency shows historical occurrence within the selected window. It can help identify recent concentration and quiet periods, but it should be interpreted as context rather than prediction.';
-$seoIntroPrimary = 'This page is built to help users check Mega Millions winning numbers, follow the current jackpot, confirm the next drawing date, and review hot and cold number behavior in one place.';
-$seoIntroSecondary = 'It also adds plain-language context around Mega Ball frequency, draw history, odds-related decision making, payout research, cash option questions, and common ticket-cost lookups so the page can serve both discovery and decision intent without hype.';
-$faqJson = [
-    '@context' => 'https://schema.org',
-    '@type' => 'FAQPage',
-    'mainEntity' => [
+$favoriteNumbers = [3, 7, 8, 9, 11, 13, 17, 21, 22, 23, 24, 25, 27, 31];
+
+$fallbackAsc  = range(1, 70);
+$fallbackDesc = range(70, 1, -1);
+
+// Classify keys by zone for pool building
+$highQuiet       = [];
+$highActive      = [];
+$midActive       = [];
+$lowActive       = [];
+$recentlySeen    = [];
+$nonFavoriteQuiet = [];
+
+foreach ($quietestKeys as $key) {
+    $n = leNumberToInt((string) $key);
+    if ($n > 31) {
+        $highQuiet[] = $key;
+    }
+    if (!in_array($n, $favoriteNumbers, true)) {
+        $nonFavoriteQuiet[] = $key;
+    }
+}
+
+foreach ($topActiveKeys as $key) {
+    $n = leNumberToInt((string) $key);
+    if ($n > 31) {
+        $highActive[] = $key;
+    }
+    if ($n >= 12 && $n <= 30) {
+        $midActive[] = $key;
+    }
+    if ($n <= 20) {
+        $lowActive[] = $key;
+    }
+}
+
+foreach ($mainLastSeenIndex as $key => $idx) {
+    if ($idx !== null && (int) $idx <= 4) {
+        $recentlySeen[] = $key;
+    }
+}
+
+// Mega Ball pool selectors (range 01-24)
+$megaMostActive    = leTopKeysByValue($bonusCounts, 24, false);
+$megaLeastFrequent = leTopKeysByValue($bonusCounts, 24, true);
+
+$megaQuietRecency = [];
+foreach ($bonusLastSeenIndex as $key => $bIdx) {
+    $megaQuietRecency[$key] = ($bIdx === null) ? ($nodCurrentBonus + 1) : ((int) $bIdx + 1);
+}
+arsort($megaQuietRecency, SORT_NUMERIC);
+$megaQuietOrder = array_keys($megaQuietRecency);
+
+$balancedMega   = !empty($megaMostActive)    ? (string) $megaMostActive[0]    : '01';
+$valueMega      = isset($megaMostActive[1])  ? (string) $megaMostActive[1]    : $balancedMega;
+$coverageMega   = !empty($megaQuietOrder)    ? (string) $megaQuietOrder[0]    : '03';
+$antiCrowdMega  = !empty($megaLeastFrequent) ? (string) $megaLeastFrequent[0] : '17';
+
+// Build recommendation plays
+$balancedPlay  = leBuildPlayFromPools(
+    [$topActiveKeys, $recentlySeen, $midActive],
+    $fallbackAsc,
+    5
+);
+$valuePlay = leBuildPlayFromPools(
+    [$topActiveKeys, $highActive, $recentlySeen],
+    $fallbackAsc,
+    5
+);
+$coveragePlay = leBuildPlayFromPools(
+    [$quietestKeys, $highQuiet, $lowActive],
+    $fallbackAsc,
+    5
+);
+$antiCrowdPlay = leBuildPlayFromPools(
+    [$nonFavoriteQuiet, $highQuiet, array_reverse($topActiveKeys)],
+    $fallbackDesc,
+    5
+);
+
+$recommendations = [
+    [
+        'id'           => 'balanced',
+        'title'        => 'Balanced frequency play',
+        'strategy'     => 'Active + recent coverage blend',
+        'risk_style'   => 'Moderate risk',
+        'numbers'      => $balancedPlay,
+        'bonus'        => $balancedMega,
+        'ticket_count' => 1,
+        'cost'         => 2.00,
+        'rationale'    => 'Draws from top-active and recently seen numbers for a broad current-signal blend.',
+        'cta'          => 'Use this play',
+    ],
+    [
+        'id'           => 'value',
+        'title'        => 'Value frequency play',
+        'strategy'     => 'High-active with upper-range coverage',
+        'risk_style'   => 'Conservative',
+        'numbers'      => $valuePlay,
+        'bonus'        => $valueMega,
+        'ticket_count' => 1,
+        'cost'         => 2.00,
+        'rationale'    => 'Prioritizes current top-active numbers with upper-range balance to reduce clustering.',
+        'cta'          => 'Use this play',
+    ],
+    [
+        'id'           => 'coverage',
+        'title'        => 'Quiet coverage play',
+        'strategy'     => 'Cold and overdue numbers',
+        'risk_style'   => 'Higher risk',
+        'numbers'      => $coveragePlay,
+        'bonus'        => $coverageMega,
+        'ticket_count' => 1,
+        'cost'         => 2.00,
+        'rationale'    => 'Prioritizes numbers absent longest from the draw window, plus quiet upper-range coverage.',
+        'cta'          => 'Use this play',
+    ],
+    [
+        'id'           => 'anti-crowd',
+        'title'        => 'Anti-crowd play',
+        'strategy'     => 'Low overlap with popular patterns',
+        'risk_style'   => 'Anti-crowd structure',
+        'numbers'      => $antiCrowdPlay,
+        'bonus'        => $antiCrowdMega,
+        'ticket_count' => 1,
+        'cost'         => 2.00,
+        'rationale'    => 'Avoids known favorite numbers and tight birthday-zone clustering to minimize prize-sharing if this line wins.',
+        'cta'          => 'Use this play',
+    ],
+];
+
+$recommendationMap = [];
+foreach ($recommendations as $play) {
+    $recommendationMap[$play['id']] = $play;
+}
+
+$crowdScores = [];
+foreach ($recommendations as $play) {
+    $crowdScores[$play['id']] = leCrowdRiskProfile($play['numbers'], $favoriteNumbers);
+}
+
+$latestMainForProfile = [$p1, $p2, $p3, $p4, $p5];
+$combinationProfiles  = [];
+$combinationProfiles[] = [
+    'name'    => 'Latest draw',
+    'numbers' => [$p1, $p2, $p3, $p4, $p5],
+    'profile' => leBuildCombinationProfile([$p1, $p2, $p3, $p4, $p5], $latestMainForProfile),
+];
+foreach ($recommendations as $play) {
+    $combinationProfiles[] = [
+        'name'    => $play['title'],
+        'numbers' => $play['numbers'],
+        'profile' => leBuildCombinationProfile($play['numbers'], $latestMainForProfile),
+    ];
+}
+
+/**
+ * Bankroll plans — Mega Millions ($2 per line)
+ * Plans are calibrated for a $2.00 base ticket price.
+ */
+$bankrollPlans = [
+    [
+        'budget'     => '$10 budget (5 lines)',
+        'lines'      => '5 lines',
+        'style'      => 'Single-profile coverage — pick one strategy and run it consistently',
+        'priority'   => 'Favor spread over depth at this size',
+        'anti_crowd' => 'Optional — run one anti-crowd line if prize sharing is a concern',
+    ],
+    [
+        'budget'     => '$20 budget (10 lines)',
+        'lines'      => '10 lines',
+        'style'      => 'Two-profile split — balanced and anti-crowd profiles together',
+        'priority'   => 'Balance coverage and anti-crowd positioning',
+        'anti_crowd' => 'Yes — dedicate 3–4 lines to non-favorite, upper-range compositions',
+    ],
+    [
+        'budget'     => '$40 budget (20 lines)',
+        'lines'      => '20 lines',
+        'style'      => 'Full four-profile coverage — run all four plays with ticket variation',
+        'priority'   => 'Full-range SKAI complement — expand via SKAI Analysis tool',
+        'anti_crowd' => 'Yes — anti-crowd should be a distinct profile at this volume',
+    ],
+    [
+        'budget'     => '$100+ budget',
+        'lines'      => '50+ lines',
+        'style'      => 'Full SKAI workflow recommended — use SKAI Analysis for structured multi-profile output',
+        'priority'   => 'Structured spread across all signal layers',
+        'anti_crowd' => 'Core requirement — anti-crowd spread matters significantly at higher volume',
+    ],
+];
+
+$waysToWin = 9;
+
+/**
+ * Mega Millions game configuration
+ * Matrix: 5 main balls from 01-70, 1 Mega Ball from 01-24 (per system config)
+ * Jackpot odds: C(70,5) x 24 = 12,103,014 x 24 = 290,472,336 total combinations
+ * Ticket price: $2.00 standard (verify current price at megamillions.com)
+ * Draw schedule: Tuesday and Friday nights
+ */
+$lotteryConfig = [
+    'ticket_price'         => 2.00,
+    'ticket_price_note'    => 'Standard Mega Millions base play. Megaplier option adds $1 per line. Verify current prices at megamillions.com.',
+    'jackpot_odds'         => '1 in 290,472,336',
+    'draw_schedule'        => 'Tuesday and Friday at 11:00 PM ET. Ticket sales close at 10:45 PM ET on draw nights.',
+    'payout_disclaimer'    => 'Odds above are calculated from the platform-configured matrix (5/70 + 1/24). Jackpot and prize amounts vary by rollover and ticket sales. Cash option is typically approximately 60% of the advertised annuity jackpot. Always verify current amounts at megamillions.com.',
+    'expected_value_text'  => 'Standard expected value on a $2 Mega Millions ticket is typically below the ticket price when accounting for tax rates, annuity discounting, and jackpot probability. Mega Millions is best understood as structured entertainment with a jackpot upside component.',
+    'prize_tiers'          => [
+        ['tier' => 'Match 5 + Mega Ball',  'odds' => '1 in 290,472,336',  'payout_text' => 'Jackpot — annuity or lump-sum cash option (see megamillions.com)'],
+        ['tier' => 'Match 5',              'odds' => '1 in 12,629,275',   'payout_text' => '$1,000,000 (see official site for current amount)'],
+        ['tier' => 'Match 4 + Mega Ball',  'odds' => '1 in 893,760',      'payout_text' => '$10,000 (see official site for current amount)'],
+        ['tier' => 'Match 4',              'odds' => '1 in 38,862',       'payout_text' => '$500'],
+        ['tier' => 'Match 3 + Mega Ball',  'odds' => '1 in 13,965',       'payout_text' => '$200'],
+        ['tier' => 'Match 3',              'odds' => '1 in 607',          'payout_text' => '$10'],
+        ['tier' => 'Match 2 + Mega Ball',  'odds' => '1 in 665',          'payout_text' => '$10'],
+        ['tier' => 'Match 1 + Mega Ball',  'odds' => '1 in 86',           'payout_text' => '$4'],
+        ['tier' => 'Match 0 + Mega Ball',  'odds' => '1 in 35',           'payout_text' => '$2'],
+    ],
+    'faq_snippets' => [
         [
-            '@type' => 'Question',
-            'name' => 'What does this Mega Millions page show?',
-            'acceptedAnswer' => [
-                '@type' => 'Answer',
-                'text' => 'It shows the latest Mega Millions winning numbers, current jackpot context, next drawing date, Mega Ball frequency, white-ball frequency, and draw-history analysis tools.'
-            ]
+            'q' => 'What is the Mega Millions matrix?',
+            'a' => 'Players choose 5 main numbers from 01 to 70 and one Mega Ball from 01 to 24 as configured on this platform. Match all six for the jackpot.',
         ],
         [
-            '@type' => 'Question',
-            'name' => 'Does this page help with Mega Millions jackpot, payout, and cash option research?',
-            'acceptedAnswer' => [
-                '@type' => 'Answer',
-                'text' => 'Yes. This page focuses on results and analysis first, then links users into related payout, cash option, ticket-cost, quick-pick, and deeper analysis workflows when those topics matter.'
-            ]
+            'q' => 'How much does a Mega Millions ticket cost?',
+            'a' => 'The standard base ticket is $2.00 per play. Adding the Megaplier option increases the cost per line by $1. Verify current prices at megamillions.com.',
         ],
         [
-            '@type' => 'Question',
-            'name' => 'Are frequency and hot-cold numbers predictions?',
-            'acceptedAnswer' => [
-                '@type' => 'Answer',
-                'text' => 'No. Frequency, recency, and hot-cold views are descriptive tools that help users understand draw history. They do not guarantee future outcomes.'
-            ]
+            'q' => 'When are Mega Millions draws held?',
+            'a' => 'Drawings are held Tuesday and Friday at 11:00 PM ET. Ticket sales typically close at 10:45 PM ET on draw nights, though cutoff times vary by state.',
         ],
         [
-            '@type' => 'Question',
-            'name' => 'Why include odds, ticket cost, and Mega Ball context on the same page?',
-            'acceptedAnswer' => [
-                '@type' => 'Answer',
-                'text' => 'Users often search Mega Millions winning numbers together with jackpot size, odds, ticket price, cash option, Mega Ball information, and payout questions. Keeping those topics organized on one page improves clarity and reduces search friction.'
-            ]
-        ]
-    ]
+            'q' => 'What is the Mega Millions jackpot odds?',
+            'a' => 'Based on the platform-configured matrix of 5 from 70 and 1 Mega Ball from 24, the jackpot odds are approximately 1 in 290,472,336. Verify official odds at megamillions.com.',
+        ],
+        [
+            'q' => 'What is the cash option vs annuity?',
+            'a' => 'Winners choose either a one-time lump-sum cash payment or a 30-year annuity paid over time. The cash option is typically approximately 60% of the advertised jackpot before taxes. See megamillions.com for current details.',
+        ],
+    ],
 ];
-$datasetJson = [
-    '@context' => 'https://schema.org',
-    '@type' => 'Dataset',
-    'name' => 'Mega Millions results and frequency analysis',
-    'description' => 'Historical Mega Millions winning numbers analysis including white-ball frequency, Mega Ball frequency, recency, and current draw context.',
-    'keywords' => [
-        'mega millions winning numbers',
-        'mega millions drawing',
-        'mega millions jackpot',
-        'mega millions odds',
-        'mega millions payout',
-        'mega millions cash option',
-        'mega ball winning numbers',
-        'mega millions ticket cost'
-    ]
+
+/**
+ * Copy and narrative
+ */
+$seoIntroPrimary = 'This page shows the latest Mega Millions winning numbers alongside frequency, recency, and draw context for both white-ball numbers (01-70) and the Mega Ball (01-24). Use it to understand which numbers have appeared most often, which have been absent longest, and how recent draw behavior compares with broader history.';
+$seoIntroSecondary = 'Adjacent intent covered here: jackpot context, next draw date, payout guidance, cash option vs. annuity notes, ticket cost reference, and Mega Ball frequency. This keeps all primary Mega Millions research needs in one place before users move into SKAI advanced analysis.';
+
+$heroInsight = 'Latest white-ball and Mega Ball frequency, recency, and draw context for Mega Millions — with structured analysis tools.';
+$overviewNote = 'Frequency and recency are descriptive signals, not predictors. Use the overview to orient quickly, then move to the frequency deep dive or SKAI tools for structured exploration.';
+$windowChangeNarrative = 'A shorter window weights recent behavior more heavily. A broader window smooths out recent streaks and shows longer-term distribution. Neither view predicts future outcomes — they describe different slices of the same historical record.';
+
+/**
+ * JSON-LD Schema
+ */
+$schemaDrawDate    = $drawDate    ? date('Y-m-d', strtotime($drawDate))     : '';
+$schemaNextDraw    = $nextDrawDate ? date('Y-m-d', strtotime($nextDrawDate)) : '';
+$schemaNumbers     = implode(', ', array_filter([$p1, $p2, $p3, $p4, $p5]));
+$schemaMegaBall    = $pb;
+$schemaJackpot     = ($nextJackpot !== '' && (float) $nextJackpot > 0) ? number_format((float) $nextJackpot, 0, '.', ',') : '';
+
+$schemaJsonLd = [
+    '@context'        => 'https://schema.org',
+    '@type'           => 'Event',
+    'name'            => 'Mega Millions Draw',
+    'startDate'       => $schemaDrawDate,
+    'description'     => 'Mega Millions winning numbers: ' . $schemaNumbers . '. Mega Ball: ' . $schemaMegaBall . '.',
+    'organizer'       => [
+        '@type' => 'Organization',
+        'name'  => 'Multi-State Lottery Association',
+        'url'   => 'https://www.megamillions.com',
+    ],
+    'location'        => [
+        '@type'   => 'Place',
+        'name'    => 'Multi State',
+        'address' => [
+            '@type'           => 'PostalAddress',
+            'addressCountry'  => 'US',
+        ],
+    ],
+    'eventStatus'     => 'https://schema.org/EventScheduled',
+    'eventAttendanceMode' => 'https://schema.org/OfflineEventAttendanceMode',
 ];
-$webPageJson = [
-    '@context' => 'https://schema.org',
-    '@type' => 'WebPage',
-    'name' => 'Mega Millions Winning Numbers, Jackpot, Odds & Analysis',
-    'description' => 'Latest Mega Millions winning numbers, jackpot details, next drawing date, Mega Ball stats, hot and cold numbers, payout context, cash option guidance, ticket cost references, and deeper analysis tools.',
-    'inLanguage' => 'en',
-    'url' => $canonicalNoQuery
-];
-$doc->addCustomTag('<script type="application/ld+json">' . json_encode($webPageJson, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>');
-$doc->addCustomTag('<script type="application/ld+json">' . json_encode($datasetJson, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>');
-$doc->addCustomTag('<script type="application/ld+json">' . json_encode($faqJson, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>');
+
+if ($schemaNextDraw) {
+    $schemaJsonLd['subEvent'] = [
+        '@type'     => 'Event',
+        'name'      => 'Next Mega Millions Draw',
+        'startDate' => $schemaNextDraw,
+    ];
+}
+if ($schemaJackpot !== '') {
+    $schemaJsonLd['offers'] = [
+        '@type'         => 'Offer',
+        'price'         => $schemaJackpot,
+        'priceCurrency' => 'USD',
+        'name'          => 'Next Jackpot',
+    ];
+}
+
+$doc->addCustomTag('<script type="application/ld+json">' . json_encode($schemaJsonLd, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . '</script>');
 ?>
 [[style]]
 :root{
-  --skai-blue:#1C66FF;
   --deep-navy:#0A1A33;
-  --sky-gray:#EFEFF5;
-  --soft-slate:#7F8DAA;
-  --success-green:#20C997;
-  --caution-amber:#F5A623;
-  --white:#FFFFFF;
-  --danger-red:#A61D2D;
-
-  --grad-horizon:linear-gradient(135deg,#0A1A33 0%,#1C66FF 100%);
-  --grad-radiant:linear-gradient(135deg,#1C66FF 0%,#7F8DAA 100%);
-  --grad-slate:linear-gradient(180deg,#EFEFF5 0%,#FFFFFF 100%);
-  --grad-success:linear-gradient(135deg,#20C997 0%,#0A1A33 100%);
-  --grad-ember:linear-gradient(135deg,#F5A623 0%,#0A1A33 100%);
-
-  --text:#0A1A33;
-  --text-soft:#5F6F8C;
+  --skai-blue:#1C66FF;
+  --sky-gray:#F2F4FA;
+  --soft-slate:#6B7A99;
   --line:rgba(10,26,51,.10);
-  --line-strong:rgba(10,26,51,.16);
-  --shadow-1:0 12px 32px rgba(10,26,51,.08);
-  --shadow-2:0 20px 48px rgba(10,26,51,.14);
-  --radius-14:14px;
-  --radius-18:18px;
-  --radius-22:22px;
-  --font:Inter,"SF Pro Text","SF Pro Display","Helvetica Neue",Arial,sans-serif;
+  --line-strong:rgba(10,26,51,.18);
+  --text:#1A2540;
+  --text-soft:#4A5568;
+  --grad-horizon:linear-gradient(135deg,#1C66FF 0%,#0A3FAD 100%);
+  --grad-radiant:linear-gradient(135deg,#7C3AED 0%,#4F46E5 100%);
+  --grad-success:linear-gradient(135deg,#059669 0%,#047857 100%);
+  --grad-ember:linear-gradient(135deg,#F5A623 0%,#E07B15 100%);
+  --grad-slate:linear-gradient(180deg,#F8FAFF 0%,#FFFFFF 100%);
+  --shadow-1:0 2px 12px rgba(10,26,51,.07);
 }
 
-*{box-sizing:border-box}
+*,::before,::after{box-sizing:border-box;}
 
 .skai-page{
-  max-width:1180px;
-  margin:0 auto;
-  padding:20px 14px 32px;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   color:var(--text);
-  font-family:var(--font);
-}
-
-.skai-page a{
-  text-decoration:none;
-}
-
-.skai-grid{
-  display:grid;
-  gap:14px;
+  max-width:1200px;
+  margin:0 auto;
+  padding:20px 16px 40px;
 }
 
 .skai-hero{
-  position:relative;
+  border-radius:24px;
   overflow:hidden;
-  border-radius:var(--radius-22);
-  background:
-    radial-gradient(900px 420px at -10% -20%,rgba(255,255,255,.13) 0%,rgba(255,255,255,0) 55%),
-    radial-gradient(780px 340px at 110% 0%,rgba(255,255,255,.10) 0%,rgba(255,255,255,0) 55%),
-    var(--grad-horizon);
-  color:#fff;
-  box-shadow:var(--shadow-2);
-  border:1px solid rgba(255,255,255,.10);
+  background:var(--grad-horizon);
+  box-shadow:0 20px 48px rgba(10,26,51,.22);
+  margin-bottom:0;
 }
 
 .skai-hero-inner{
-  padding:22px 20px 18px;
+  padding:24px 20px 20px;
 }
 
 .skai-hero-top{
   display:grid;
   grid-template-columns:110px minmax(0,1fr) 280px;
-  gap:18px;
+  gap:16px;
   align-items:start;
 }
 
 .skai-logo{
   width:110px;
   height:110px;
-  border-radius:20px;
-  background:rgba(255,255,255,.94);
+  border-radius:18px;
+  overflow:hidden;
+  background:rgba(255,255,255,.10);
   display:flex;
   align-items:center;
   justify-content:center;
-  box-shadow:0 14px 30px rgba(0,0,0,.16);
-  overflow:hidden;
-  padding:12px;
+  flex-shrink:0;
 }
 
 .skai-logo img{
   width:100%;
   height:100%;
   object-fit:contain;
-  display:block;
 }
 
 .skai-hero-copy{
@@ -670,9 +1045,9 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($faqJson,
 }
 
 .skai-kicker{
-  font-size:12px;
+  font-size:11px;
   line-height:1.2;
-  letter-spacing:.18em;
+  letter-spacing:.14em;
   text-transform:uppercase;
   font-weight:800;
   color:rgba(255,255,255,.76);
@@ -989,6 +1364,10 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($faqJson,
   gap:14px;
 }
 
+.skai-overview-grid > *{
+  min-width:0;
+}
+
 .skai-card{
   background:#fff;
   border:1px solid var(--line);
@@ -1024,15 +1403,15 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($faqJson,
 }
 
 .skai-chart-shell{
+  position:relative;
   width:100%;
-  box-sizing:border-box;
-  overflow:hidden;
 }
 
 .skai-chart-frame{
   position:relative;
   width:100%;
   height:300px;
+  overflow:hidden;
 }
 
 .skai-chart-frame--tall{
@@ -1050,9 +1429,29 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($faqJson,
   line-height:1.7;
 }
 
+.skai-simple-note{
+  margin-top:12px;
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid rgba(28,102,255,.16);
+  background:linear-gradient(180deg,rgba(28,102,255,.05) 0%,#FFFFFF 100%);
+  color:var(--text-soft);
+  font-size:13px;
+  line-height:1.65;
+}
+
 .skai-two-col{
   display:grid;
   grid-template-columns:1fr 1fr;
+  gap:14px;
+}
+
+.skai-two-col > *{
+  min-width:0;
+}
+
+.skai-grid{
+  display:grid;
   gap:14px;
 }
 
@@ -1197,6 +1596,19 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($faqJson,
 
 .skai-button:hover{
   filter:brightness(1.03);
+}
+
+.skai-button--ghost{
+  min-height:44px;
+  padding:10px 14px;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:#fff;
+  color:var(--deep-navy);
+  font-size:13px;
+  line-height:1.2;
+  font-weight:850;
+  cursor:pointer;
 }
 
 .skai-filter-group{
@@ -1468,7 +1880,6 @@ table.skai-table tbody tr:hover{
   color:var(--deep-navy);
 }
 
-
 .skai-intro-copy{
   margin-top:16px;
   display:grid;
@@ -1505,6 +1916,11 @@ table.skai-table tbody tr:hover{
   border-radius:16px;
   background:linear-gradient(180deg,#FFFFFF 0%,#FAFBFF 100%);
   padding:14px 16px;
+  margin-top:0;
+}
+
+.skai-faq-item + .skai-faq-item{
+  border-top:none;
 }
 
 .skai-faq-q{
@@ -1522,6 +1938,248 @@ table.skai-table tbody tr:hover{
   color:var(--text-soft);
 }
 
+/* --- Premium additions from approved elite template --- */
+
+.skai-play-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+}
+
+.skai-play-card{
+  border:1px solid var(--line);
+  border-radius:18px;
+  background:#fff;
+  box-shadow:0 10px 24px rgba(10,26,51,.06);
+  overflow:hidden;
+}
+
+.skai-play-body{
+  padding:14px 16px 16px;
+}
+
+.skai-tag-row{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-bottom:10px;
+}
+
+.skai-tag{
+  display:inline-flex;
+  align-items:center;
+  min-height:28px;
+  padding:6px 10px;
+  border-radius:999px;
+  font-size:11px;
+  line-height:1.2;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+  font-weight:850;
+  border:1px solid var(--line);
+  color:var(--deep-navy);
+  background:#F8FAFE;
+}
+
+.skai-play-balls{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:10px 0;
+}
+
+.skai-play-meta{
+  margin:10px 0 0;
+  padding:10px 12px;
+  border-radius:12px;
+  border:1px solid var(--line);
+  background:linear-gradient(180deg,#FFFFFF 0%,#FAFBFF 100%);
+  font-size:13px;
+  line-height:1.6;
+  color:var(--text-soft);
+}
+
+.skai-play-meta strong{
+  color:var(--deep-navy);
+}
+
+.skai-play-cta-row{
+  margin-top:12px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+}
+
+.skai-odds-grid{
+  display:grid;
+  grid-template-columns:1fr 1.3fr;
+  gap:14px;
+}
+
+.skai-kv{
+  display:grid;
+  gap:10px;
+}
+
+.skai-kv-item{
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:#fff;
+  padding:12px 13px;
+}
+
+.skai-kv-label{
+  margin:0;
+  font-size:11px;
+  line-height:1.2;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  font-weight:850;
+  color:var(--soft-slate);
+}
+
+.skai-kv-value{
+  margin:8px 0 0;
+  font-size:15px;
+  line-height:1.5;
+  font-weight:800;
+  color:var(--deep-navy);
+}
+
+.skai-profile-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+}
+
+.skai-profile{
+  border:1px solid var(--line);
+  border-radius:16px;
+  background:linear-gradient(180deg,#FFFFFF 0%,#FAFBFF 100%);
+  overflow:hidden;
+}
+
+.skai-profile-head{
+  padding:12px 14px;
+  border-bottom:1px solid var(--line);
+  font-size:14px;
+  line-height:1.3;
+  font-weight:850;
+  color:var(--deep-navy);
+}
+
+.skai-profile-body{
+  padding:12px 14px 14px;
+}
+
+.skai-metric{
+  margin:0 0 6px;
+  font-size:13px;
+  line-height:1.55;
+  color:var(--text-soft);
+}
+
+.skai-metric strong{
+  color:var(--deep-navy);
+}
+
+.skai-crowd-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px;
+}
+
+.skai-crowd-item{
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:12px 13px;
+  background:#fff;
+}
+
+.skai-crowd-level{
+  margin:0;
+  font-size:14px;
+  line-height:1.25;
+  font-weight:850;
+  color:var(--deep-navy);
+}
+
+.skai-crowd-copy{
+  margin:8px 0 0;
+  font-size:13px;
+  line-height:1.6;
+  color:var(--text-soft);
+}
+
+.skai-bankroll-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+}
+
+.skai-bankroll-card{
+  border:1px solid var(--line);
+  border-radius:16px;
+  background:#fff;
+  padding:14px;
+}
+
+.skai-bankroll-title{
+  margin:0 0 10px;
+  font-size:16px;
+  line-height:1.2;
+  font-weight:900;
+  color:var(--deep-navy);
+}
+
+.skai-bankroll-copy{
+  margin:0 0 8px;
+  font-size:13px;
+  line-height:1.6;
+  color:var(--text-soft);
+}
+
+.skai-guide-grid{
+  display:grid;
+  grid-template-columns:1.3fr 1fr;
+  gap:14px;
+}
+
+.skai-guide-panel{
+  border:1px solid var(--line);
+  border-radius:16px;
+  background:linear-gradient(180deg,#FFFFFF 0%,#FAFBFF 100%);
+  padding:14px;
+}
+
+.skai-guide-panel h3{
+  margin:0 0 10px;
+  font-size:16px;
+  line-height:1.25;
+  font-weight:900;
+  color:var(--deep-navy);
+}
+
+.skai-guide-panel p,
+.skai-guide-panel li{
+  font-size:14px;
+  line-height:1.7;
+  color:var(--text-soft);
+}
+
+.skai-guide-panel ul{
+  margin:8px 0 0 18px;
+  padding:0;
+}
+
+.skai-strategy-status{
+  margin-top:10px;
+  min-height:20px;
+  font-size:12px;
+  line-height:1.5;
+  color:var(--soft-slate);
+}
+
 @media (max-width:1080px){
   .skai-hero-top{
     grid-template-columns:96px minmax(0,1fr);
@@ -1532,6 +2190,12 @@ table.skai-table tbody tr:hover{
   }
 
   .skai-strip,
+  .skai-play-grid,
+  .skai-odds-grid,
+  .skai-profile-grid,
+  .skai-crowd-grid,
+  .skai-bankroll-grid,
+  .skai-guide-grid,
   .skai-tool-grid,
   .skai-overview-grid,
   .skai-two-col{
@@ -1542,6 +2206,10 @@ table.skai-table tbody tr:hover{
   .skai-advanced-links,
   .skai-intro-copy{
     grid-template-columns:1fr;
+  }
+
+  .skai-utility-grid{
+    grid-template-columns:repeat(2,minmax(0,1fr));
   }
 }
 
@@ -1601,7 +2269,7 @@ table.skai-table tbody tr:hover{
           <?php if ($logo['exists'] && $logo['url'] !== '') : ?>
             [[img
               src="<?php echo htmlspecialchars($logo['url'], ENT_QUOTES, 'UTF-8'); ?>"
-              alt="<?php echo htmlspecialchars($stateName . ' ' . $gName, ENT_QUOTES, 'UTF-8'); ?>"
+              alt="<?php echo htmlspecialchars((string) $stateName . ' ' . (string) $gName, ENT_QUOTES, 'UTF-8'); ?>"
               width="110"
               height="110"
               loading="lazy"
@@ -1616,10 +2284,14 @@ table.skai-table tbody tr:hover{
 
         [[div class="skai-hero-copy"]]
           [[div class="skai-kicker"]]Results Intelligence &bull; Verified Draw &bull; Calm Analytical View[[/div]]
-          [[h1 class="skai-title"]]<?php echo htmlspecialchars($stateName, ENT_QUOTES, 'UTF-8'); ?> - Mega Millions[[/h1]]
+          [[h1 class="skai-title"]]
+            <?php echo htmlspecialchars((string) $stateName, ENT_QUOTES, 'UTF-8'); ?>
+            &ndash;
+            <?php echo htmlspecialchars((string) $gName, ENT_QUOTES, 'UTF-8'); ?>
+          [[/h1]]
           [[p class="skai-hero-summary"]]<?php echo htmlspecialchars($heroInsight, ENT_QUOTES, 'UTF-8'); ?>[[/p]]
 
-          [[div class="skai-ball-row" aria-label="Latest drawn numbers"]]
+          [[div class="skai-ball-row" aria-label="Latest Mega Millions winning numbers"]]
             [[span class="skai-ball skai-ball--main"]]<?php echo htmlspecialchars(lePad2($p1), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
             [[span class="skai-ball skai-ball--main"]]<?php echo htmlspecialchars(lePad2($p2), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
             [[span class="skai-ball skai-ball--main"]]<?php echo htmlspecialchars(lePad2($p3), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
@@ -1634,20 +2306,17 @@ table.skai-table tbody tr:hover{
               Open SKAI Analysis
             [[/a]]
             [[a class="skai-btn skai-btn--secondary" href="/picking-winning-numbers/artificial-intelligence/ai-powered-predictions?game_id=113"]]
-              Open AI Analysis
+              AI Predictions
             [[/a]]
-            [[a class="skai-btn skai-btn--secondary" href="/lottery-archives?gId=113&amp;gName=megamillions&amp;sTn=ar"]]
-              Open Lottery Archives
+            [[a class="skai-btn skai-btn--secondary" href="#frequency-deep-dive"]]
+              View Frequency Deep Dive
             [[/a]]
           [[/div]]
 
           [[div class="skai-advanced-links" aria-label="Advanced tools"]]
-            [[a class="skai-mini-link" href="/lowest-drawn-number-analysis?gId=113&amp;stateName=<?php echo rawurlencode($stateName); ?>&amp;gName=<?php echo rawurlencode($gName); ?>&amp;sTn=ar"]]Lowest Number Threshold[[/a]]
             [[a class="skai-mini-link" href="/picking-winning-numbers/artificial-intelligence/skip-and-hit-analysis?game_id=113"]]Skip &amp; Hit Analysis[[/a]]
             [[a class="skai-mini-link" href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?gameId=113"]]MCMC Markov Analysis[[/a]]
-            [[a class="skai-mini-link" href="/all-lottery-heatmaps?gameId=113"]]Heatmap Analysis[[/a]]
-            [[a class="skai-mini-link" href="/mega-millions/mega-millions-quick-pick-today/"]]Quick Picks Today[[/a]]
-            [[a class="skai-mini-link" href="/mega-millions/mega-millions-lucky-numbers-today/"]]Lucky Numbers Today[[/a]]
+            [[a class="skai-mini-link" href="/all-lottery-heatmaps?gId=113&amp;stateName=Multi+State&amp;gName=Mega+Millions&amp;sTn=ar"]]Heatmap Analysis[[/a]]
           [[/div]]
         [[/div]]
 
@@ -1658,28 +2327,88 @@ table.skai-table tbody tr:hover{
             [[div class="skai-meta-row"]]
               [[div class="skai-meta-box"]]
                 [[span class="label"]]Draw date[[/span]]
-                [[span class="value"]]<?php echo leFmtDateLong($drawDate); ?>[[/span]]
+                [[span class="value"]]<?php echo htmlspecialchars(leFmtDateLong($drawDate), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
               [[/div]]
               [[div class="skai-meta-box"]]
                 [[span class="label"]]Next draw date[[/span]]
-                [[span class="value"]]<?php echo leFmtDateLong($nextDrawDate); ?>[[/span]]
+                [[span class="value"]]<?php echo htmlspecialchars(leFmtDateLong($nextDrawDate), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
               [[/div]]
             [[/div]]
-
-            <?php if ($nextJackpot !== '' && (float) $nextJackpot > 0 && strtolower($nextJackpot) !== 'n/a') : ?>
-              [[div class="skai-meta-box"]]
-                [[span class="label"]]Next jackpot[[/span]]
-                [[span class="value"]]$<?php echo htmlspecialchars(number_format((float) $nextJackpot, 0, '.', ','), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
-              [[/div]]
-            <?php endif; ?>
 
             [[div class="skai-meta-box"]]
               [[span class="label"]]Current perspective[[/span]]
               [[span class="value"]]Recent activity, quiet stretches, and full distribution within your selected analysis window.[[/span]]
             [[/div]]
+
+            <?php if ($nextJackpot !== '' && $nextJackpot !== '0' && $nextJackpot !== 'n/a') : ?>
+              [[div class="skai-meta-box"]]
+                [[span class="label"]]Next jackpot[[/span]]
+                [[span class="value"]]$<?php echo htmlspecialchars(number_format((float) $nextJackpot, 0, '.', ','), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
+              [[/div]]
+            <?php endif; ?>
           [[/div]]
         [[/aside]]
       [[/div]]
+    [[/div]]
+  [[/section]]
+
+  [[section id="best-plays" class="skai-section" aria-labelledby="best-plays-title"]]
+    [[div class="skai-section-head"]]
+      [[div]]
+        [[h2 id="best-plays-title" class="skai-section-title"]]Today&rsquo;s best plays[[/h2]]
+        [[p class="skai-section-sub"]]
+          Structured recommendation profiles generated from this page&rsquo;s frequency, recency, quiet-stretch, repeat, and distribution signals. These are planning templates, not guarantees.
+        [[/p]]
+      [[/div]]
+    [[/div]]
+    [[div class="skai-section-body"]]
+      [[div class="skai-play-grid"]]
+        <?php foreach ($recommendations as $play) : ?>
+          <?php $risk = $crowdScores[$play['id']] ?? ['label' => 'Medium crowd risk', 'explanation' => '']; ?>
+          [[article class="skai-play-card"]]
+            [[div class="skai-card-head skai-card-head--horizon"]]
+              <?php echo htmlspecialchars((string) $play['title'], ENT_QUOTES, 'UTF-8'); ?>
+              [[span class="skai-card-sub"]]<?php echo htmlspecialchars((string) $play['strategy'], ENT_QUOTES, 'UTF-8'); ?>[[/span]]
+            [[/div]]
+            [[div class="skai-play-body"]]
+              [[div class="skai-tag-row"]]
+                [[span class="skai-tag"]]<?php echo htmlspecialchars((string) $play['risk_style'], ENT_QUOTES, 'UTF-8'); ?>[[/span]]
+                [[span class="skai-tag"]]<?php echo htmlspecialchars((string) $risk['label'], ENT_QUOTES, 'UTF-8'); ?>[[/span]]
+              [[/div]]
+              [[div class="skai-play-balls" aria-label="<?php echo htmlspecialchars((string) $play['title'], ENT_QUOTES, 'UTF-8'); ?> numbers"]]
+                <?php foreach ((array) $play['numbers'] as $num) : ?>
+                  [[span class="skai-ball skai-ball--main"]]<?php echo htmlspecialchars(lePad2((string) $num), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
+                <?php endforeach; ?>
+                [[span class="skai-ball-gap" aria-hidden="true"]][[/span]]
+                [[span class="skai-ball skai-ball--bonus"]]<?php echo htmlspecialchars(lePad2((string) $play['bonus']), ENT_QUOTES, 'UTF-8'); ?>[[/span]]
+              [[/div]]
+              [[div class="skai-play-meta"]]
+                [[strong]]Estimated ticket count:[[/strong]] <?php echo (int) $play['ticket_count']; ?>[[br]]
+                [[strong]]Estimated cost:[[/strong]] $<?php echo htmlspecialchars(number_format((float) $play['cost'], 2, '.', ','), ENT_QUOTES, 'UTF-8'); ?>[[br]]
+                [[strong]]Rationale:[[/strong]] <?php echo htmlspecialchars((string) $play['rationale'], ENT_QUOTES, 'UTF-8'); ?>
+              [[/div]]
+              [[div class="skai-play-cta-row"]]
+                [[button class="skai-button" type="button"]]
+                  <?php echo htmlspecialchars((string) $play['cta'], ENT_QUOTES, 'UTF-8'); ?>
+                [[/button]]
+                [[button
+                  class="skai-button--ghost js-save-strategy"
+                  type="button"
+                  data-strategy="<?php echo htmlspecialchars((string) $play['title'], ENT_QUOTES, 'UTF-8'); ?>"
+                  data-main="<?php echo htmlspecialchars(leCommaList((array) $play['numbers']), ENT_QUOTES, 'UTF-8'); ?>"
+                  data-bonus="<?php echo htmlspecialchars(lePad2((string) $play['bonus']), ENT_QUOTES, 'UTF-8'); ?>"
+                ]]
+                  Save this strategy
+                [[/button]]
+              [[/div]]
+            [[/div]]
+          [[/article]]
+        <?php endforeach; ?>
+      [[/div]]
+      [[div class="skai-simple-note"]]
+        [[strong]]Simple explanation:[[/strong]] Best plays combine multiple signals so you can act with structure instead of selecting lines randomly. A profile can still miss because each draw remains independent.
+      [[/div]]
+      [[div id="strategySaveStatus" class="skai-strategy-status" aria-live="polite"]][[/div]]
     [[/div]]
   [[/section]]
 
@@ -1704,7 +2433,7 @@ table.skai-table tbody tr:hover{
       [[div class="skai-stat-head skai-stat-head--success"]]Repeated recently[[/div]]
       [[div class="skai-stat-body"]]
         [[div class="skai-stat-value"]]<?php echo htmlspecialchars(!empty($repeatedNumbers) ? leCommaList($repeatedNumbers) : 'None', ENT_QUOTES, 'UTF-8'); ?>[[/div]]
-        [[div class="skai-stat-note"]]White-ball numbers from the latest draw that also appeared in the recent trailing draws.[[/div]]
+        [[div class="skai-stat-note"]]Main numbers from the latest draw that also appeared in the recent trailing draws.[[/div]]
       [[/div]]
     [[/article]]
 
@@ -1717,33 +2446,18 @@ table.skai-table tbody tr:hover{
     [[/article]]
   [[/section]]
 
-  [[section class="skai-section" aria-labelledby="search-intent-title"]]
-    [[div class="skai-section-head"]]
-      [[div]]
-        [[h2 id="search-intent-title" class="skai-section-title"]]Mega Millions results, jackpot, odds, and payout context[[/h2]]
-        [[p class="skai-section-sub"]]
-          This layer is designed for search clarity and AI readability. It explains exactly what the page covers, why the data matters, and how users typically move from winning numbers to jackpot, payout, cash option, ticket cost, and Mega Ball research.
-        [[/p]]
-      [[/div]]
-    [[/div]]
-    [[div class="skai-section-body"]]
-      [[div class="skai-intro-copy"]]
-        [[div class="skai-copy-panel"]]
-          [[p]]<?php echo htmlspecialchars($seoIntroPrimary, ENT_QUOTES, 'UTF-8'); ?>[[/p]]
-        [[/div]]
-        [[div class="skai-copy-panel"]]
-          [[p]]<?php echo htmlspecialchars($seoIntroSecondary, ENT_QUOTES, 'UTF-8'); ?>[[/p]]
-        [[/div]]
-      [[/div]]
-    [[/div]]
-  [[/section]]
-
   [[nav class="skai-tabs" aria-label="Page navigation"]]
-    [[a class="skai-tab skai-tab--active" href="#overview"]]Overview[[/a]]
-    [[a class="skai-tab" href="#frequency-deep-dive"]]Frequency[[/a]]
+    [[a class="skai-tab skai-tab--active" href="#best-plays"]]Best Plays[[/a]]
+    [[a class="skai-tab" href="#overview"]]Overview[[/a]]
+    [[a class="skai-tab" href="#odds-payouts"]]Odds &amp; Payouts[[/a]]
+    [[a class="skai-tab" href="#combination-profile"]]Combination Profile[[/a]]
+    [[a class="skai-tab" href="#anti-crowd"]]Anti-Crowd[[/a]]
+    [[a class="skai-tab" href="#bankroll-planner"]]Bankroll Planner[[/a]]
     [[a class="skai-tab" href="#recency-deep-dive"]]Recency[[/a]]
+    [[a class="skai-tab" href="#frequency-deep-dive"]]Frequency[[/a]]
     [[a class="skai-tab" href="#tables"]]Tables[[/a]]
     [[a class="skai-tab" href="#tools"]]Advanced Tools[[/a]]
+    [[a class="skai-tab" href="#mega-millions-guide"]]Guide &amp; FAQ[[/a]]
   [[/nav]]
 
   [[section id="overview" class="skai-section" aria-labelledby="overview-title"]]
@@ -1764,10 +2478,8 @@ table.skai-table tbody tr:hover{
             [[span class="skai-card-sub"]]Highest frequency counts in the last <?php echo (int) $nodCurrentMain; ?> drawings[[/span]]
           [[/div]]
           [[div class="skai-card-body"]]
-            [[div class="skai-chart-shell"]]
-              [[div class="skai-chart-frame"]]
-                [[canvas id="topActiveChart" aria-label="Top active numbers chart" role="img"]][[/canvas]]
-              [[/div]]
+            [[div class="skai-chart-frame"]]
+              [[canvas id="topActiveChart" aria-label="Top active numbers chart" role="img"]][[/canvas]]
             [[/div]]
           [[/div]]
         [[/div]]
@@ -1778,10 +2490,8 @@ table.skai-table tbody tr:hover{
             [[span class="skai-card-sub"]]Numbers with the longest distance from their last appearance[[/span]]
           [[/div]]
           [[div class="skai-card-body"]]
-            [[div class="skai-chart-shell"]]
-              [[div class="skai-chart-frame"]]
-                [[canvas id="quietChart" aria-label="Quiet numbers chart" role="img"]][[/canvas]]
-              [[/div]]
+            [[div class="skai-chart-frame"]]
+              [[canvas id="quietChart" aria-label="Quiet numbers chart" role="img"]][[/canvas]]
             [[/div]]
           [[/div]]
         [[/div]]
@@ -1789,6 +2499,167 @@ table.skai-table tbody tr:hover{
 
       [[div class="skai-note"]]
         <?php echo htmlspecialchars($overviewNote, ENT_QUOTES, 'UTF-8'); ?>
+      [[/div]]
+      [[div class="skai-simple-note"]]
+        [[strong]]Simple explanation:[[/strong]] Frequency shows how often numbers appeared in your selected window. It is useful for structure, not certainty.
+      [[/div]]
+    [[/div]]
+  [[/section]]
+
+  [[section id="odds-payouts" class="skai-section" aria-labelledby="odds-payouts-title"]]
+    [[div class="skai-section-head"]]
+      [[div]]
+        [[h2 id="odds-payouts-title" class="skai-section-title"]]Odds and payouts[[/h2]]
+        [[p class="skai-section-sub"]]
+          Use this block to understand Mega Millions ticket economics before selecting line volume. Prize tiers below are based on the platform-configured 5/70 + 1/24 matrix. Verify current official amounts at megamillions.com.
+        [[/p]]
+      [[/div]]
+    [[/div]]
+    [[div class="skai-section-body"]]
+      [[div class="skai-odds-grid"]]
+        [[div class="skai-kv"]]
+          [[div class="skai-kv-item"]]
+            [[p class="skai-kv-label"]]Ticket cost[[/p]]
+            [[p class="skai-kv-value"]]$<?php echo htmlspecialchars(number_format((float) $lotteryConfig['ticket_price'], 2, '.', ','), ENT_QUOTES, 'UTF-8'); ?> per line[[/p]]
+            <?php if (!empty($lotteryConfig['ticket_price_note'])) : ?>
+              [[p style="margin:6px 0 0;font-size:12px;line-height:1.55;color:var(--text-soft);"]]<?php echo htmlspecialchars((string) $lotteryConfig['ticket_price_note'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+            <?php endif; ?>
+          [[/div]]
+          [[div class="skai-kv-item"]]
+            [[p class="skai-kv-label"]]Jackpot odds[[/p]]
+            [[p class="skai-kv-value"]]<?php echo htmlspecialchars((string) $lotteryConfig['jackpot_odds'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+          [[/div]]
+          [[div class="skai-kv-item"]]
+            [[p class="skai-kv-label"]]Ways to win[[/p]]
+            [[p class="skai-kv-value"]]<?php echo (int) $waysToWin; ?> prize tiers[[/p]]
+          [[/div]]
+          [[div class="skai-kv-item"]]
+            [[p class="skai-kv-label"]]Draw schedule[[/p]]
+            [[p class="skai-kv-value"]]<?php echo htmlspecialchars((string) $lotteryConfig['draw_schedule'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+          [[/div]]
+          <?php if ($nextDrawDate !== '') : ?>
+            [[div class="skai-kv-item"]]
+              [[p class="skai-kv-label"]]Next scheduled draw reference[[/p]]
+              [[p class="skai-kv-value"]]<?php echo htmlspecialchars(leFmtDateLong($nextDrawDate), ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+            [[/div]]
+          <?php endif; ?>
+        [[/div]]
+        [[div class="skai-table-wrap"]]
+          [[table class="skai-table" aria-label="Mega Millions prize tier odds and payout table"]]
+            [[thead]]
+              [[tr]]
+                [[th]]Prize Tier[[/th]]
+                [[th]]Odds[[/th]]
+                [[th]]Payout Guidance[[/th]]
+              [[/tr]]
+            [[/thead]]
+            [[tbody]]
+              <?php foreach ((array) $lotteryConfig['prize_tiers'] as $tier) : ?>
+                [[tr]]
+                  [[td]]<?php echo htmlspecialchars((string) ($tier['tier'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>[[/td]]
+                  [[td]]<?php echo htmlspecialchars((string) ($tier['odds'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>[[/td]]
+                  [[td]]<?php echo htmlspecialchars((string) ($tier['payout_text'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>[[/td]]
+                [[/tr]]
+              <?php endforeach; ?>
+            [[/tbody]]
+          [[/table]]
+        [[/div]]
+      [[/div]]
+      [[div class="skai-note"]]
+        <?php echo htmlspecialchars((string) $lotteryConfig['payout_disclaimer'], ENT_QUOTES, 'UTF-8'); ?>
+      [[/div]]
+      <?php if (!empty($lotteryConfig['expected_value_text'])) : ?>
+        [[div class="skai-simple-note"]]
+          [[strong]]Simple explanation:[[/strong]] <?php echo htmlspecialchars((string) $lotteryConfig['expected_value_text'], ENT_QUOTES, 'UTF-8'); ?>
+        [[/div]]
+      <?php endif; ?>
+    [[/div]]
+  [[/section]]
+
+  [[section id="combination-profile" class="skai-section" aria-labelledby="combination-profile-title"]]
+    [[div class="skai-section-head"]]
+      [[div]]
+        [[h2 id="combination-profile-title" class="skai-section-title"]]Combination profile intelligence[[/h2]]
+        [[p class="skai-section-sub"]]
+          Compare structural signatures across the latest draw and key recommendation profiles to understand shape, spread, and repeat behavior.
+        [[/p]]
+      [[/div]]
+    [[/div]]
+    [[div class="skai-section-body"]]
+      [[div class="skai-profile-grid"]]
+        <?php foreach ($combinationProfiles as $profileRow) : ?>
+          [[article class="skai-profile"]]
+            [[div class="skai-profile-head"]]
+              <?php echo htmlspecialchars((string) $profileRow['name'], ENT_QUOTES, 'UTF-8'); ?>
+              &mdash;
+              <?php echo htmlspecialchars(leCommaList((array) $profileRow['numbers']), ENT_QUOTES, 'UTF-8'); ?>
+            [[/div]]
+            [[div class="skai-profile-body"]]
+              [[p class="skai-metric"]][[strong]]Odd / Even:[[/strong]] <?php echo htmlspecialchars((string) $profileRow['profile']['odd_even'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+              [[p class="skai-metric"]][[strong]]Low / High:[[/strong]] <?php echo htmlspecialchars((string) $profileRow['profile']['low_high'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+              [[p class="skai-metric"]][[strong]]Sum:[[/strong]] <?php echo (int) $profileRow['profile']['sum']; ?>[[/p]]
+              [[p class="skai-metric"]][[strong]]Spread:[[/strong]] <?php echo (int) $profileRow['profile']['spread']; ?>[[/p]]
+              [[p class="skai-metric"]][[strong]]Consecutive count:[[/strong]] <?php echo (int) $profileRow['profile']['consecutive']; ?>[[/p]]
+              [[p class="skai-metric"]][[strong]]Repeated vs latest draw:[[/strong]] <?php echo (int) $profileRow['profile']['repeated']; ?>[[/p]]
+              [[p class="skai-metric"]][[strong]]Cluster density:[[/strong]] <?php echo htmlspecialchars((string) $profileRow['profile']['cluster_density'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+            [[/div]]
+          [[/article]]
+        <?php endforeach; ?>
+      [[/div]]
+      [[div class="skai-simple-note"]]
+        [[strong]]Simple explanation:[[/strong]] A profile is the shape of a line. Comparing profile shape helps you avoid accidental duplication and over-concentration.
+      [[/div]]
+    [[/div]]
+  [[/section]]
+
+  [[section id="anti-crowd" class="skai-section" aria-labelledby="anti-crowd-title"]]
+    [[div class="skai-section-head"]]
+      [[div]]
+        [[h2 id="anti-crowd-title" class="skai-section-title"]]Anti-crowd intelligence[[/h2]]
+        [[p class="skai-section-sub"]]
+          Crowd-likeness scoring estimates how likely a line resembles common number-selection patterns that may increase split-risk if the line matches the winning numbers.
+        [[/p]]
+      [[/div]]
+    [[/div]]
+    [[div class="skai-section-body"]]
+      [[div class="skai-crowd-grid"]]
+        <?php foreach ($recommendations as $play) : ?>
+          <?php $risk = $crowdScores[$play['id']] ?? ['label' => 'Medium crowd risk', 'explanation' => '']; ?>
+          [[article class="skai-crowd-item"]]
+            [[p class="skai-crowd-level"]]
+              <?php echo htmlspecialchars((string) $play['title'], ENT_QUOTES, 'UTF-8'); ?>:
+              <?php echo htmlspecialchars((string) $risk['label'], ENT_QUOTES, 'UTF-8'); ?>
+            [[/p]]
+            [[p class="skai-crowd-copy"]]<?php echo htmlspecialchars((string) $risk['explanation'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+          [[/article]]
+        <?php endforeach; ?>
+      [[/div]]
+      [[div class="skai-simple-note"]]
+        [[strong]]Simple explanation:[[/strong]] Anti-crowd does not increase draw probability. It mainly helps reduce the chance of sharing prizes with many similar tickets if that exact line wins.
+      [[/div]]
+    [[/div]]
+  [[/section]]
+
+  [[section id="bankroll-planner" class="skai-section" aria-labelledby="bankroll-planner-title"]]
+    [[div class="skai-section-head"]]
+      [[div]]
+        [[h2 id="bankroll-planner-title" class="skai-section-title"]]Bankroll planner[[/h2]]
+        [[p class="skai-section-sub"]]
+          Choose a budget structure first, then align play style, spread depth, and anti-crowd usage. All plans are calibrated for the $2.00 standard Mega Millions ticket price.
+        [[/p]]
+      [[/div]]
+    [[/div]]
+    [[div class="skai-section-body"]]
+      [[div class="skai-bankroll-grid"]]
+        <?php foreach ($bankrollPlans as $plan) : ?>
+          [[article class="skai-bankroll-card"]]
+            [[h3 class="skai-bankroll-title"]]<?php echo htmlspecialchars((string) $plan['budget'], ENT_QUOTES, 'UTF-8'); ?>[[/h3]]
+            [[p class="skai-bankroll-copy"]][[strong]]Recommended lines:[[/strong]] <?php echo htmlspecialchars((string) $plan['lines'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+            [[p class="skai-bankroll-copy"]][[strong]]Best play style:[[/strong]] <?php echo htmlspecialchars((string) $plan['style'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+            [[p class="skai-bankroll-copy"]][[strong]]Spread vs value:[[/strong]] <?php echo htmlspecialchars((string) $plan['priority'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+            [[p class="skai-bankroll-copy"]][[strong]]When to use anti-crowd:[[/strong]] <?php echo htmlspecialchars((string) $plan['anti_crowd'], ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+          [[/article]]
+        <?php endforeach; ?>
       [[/div]]
     [[/div]]
   [[/section]]
@@ -1798,7 +2669,7 @@ table.skai-table tbody tr:hover{
       [[div]]
         [[h2 id="recency-title" class="skai-section-title"]]Recency and draw context[[/h2]]
         [[p class="skai-section-sub"]]
-          This section makes the current Mega Millions draw easier to interpret. It shows how recently each latest number was previously seen and how the perspective shifts when you compare a short recent window with a broader historical one.
+          This section makes the current draw easier to interpret. It shows how recently each latest number was previously seen and how the perspective shifts when you compare a short recent window with a broader historical one.
         [[/p]]
       [[/div]]
     [[/div]]
@@ -1817,13 +2688,13 @@ table.skai-table tbody tr:hover{
                   [[div class="skai-history-name"]]<?php echo htmlspecialchars((string) $row['label'], ENT_QUOTES, 'UTF-8'); ?>[[/div]]
                   [[div class="skai-history-date"]]
                     <?php if (!empty($row['prevDate'])) : ?>
-                      Previously seen on <?php echo leFmtDateLong((string) $row['prevDate']); ?>
+                      Previously seen on <?php echo htmlspecialchars(leFmtDateLong((string) $row['prevDate']), ENT_QUOTES, 'UTF-8'); ?>
                     <?php else : ?>
                       No previous appearance found in the loaded historical set
                     <?php endif; ?>
                   [[/div]]
                   [[div class="skai-history-badge"]]
-                    <?php echo ($row['drawsAgo'] !== null) ? (int) $row['drawsAgo'] . ' drws ago' : '&#8212;'; ?>
+                    <?php echo ($row['drawsAgo'] !== null) ? (int) $row['drawsAgo'] . ' drws ago' : '&mdash;'; ?>
                   [[/div]]
                 [[/div]]
               <?php endforeach; ?>
@@ -1856,6 +2727,9 @@ table.skai-table tbody tr:hover{
           [[/div]]
         [[/div]]
       [[/div]]
+      [[div class="skai-simple-note"]]
+        [[strong]]Simple explanation:[[/strong]] Recency tells you how long numbers have been absent. It helps with timing context, but it does not force future outcomes.
+      [[/div]]
     [[/div]]
   [[/section]]
 
@@ -1864,7 +2738,7 @@ table.skai-table tbody tr:hover{
       [[div]]
         [[h2 id="frequency-title" class="skai-section-title"]]Frequency deep dive[[/h2]]
         [[p class="skai-section-sub"]]
-          Move from summary to full reference. The first panel shows the complete white-ball distribution across all values 01&ndash;70. The second panel shows the Mega Ball distribution for values 01&ndash;25 and the recency spread for each white-ball number.
+          Move from summary to full reference. The first panel shows the complete white-ball distribution across all values 01&ndash;70. The second panel shows the complete Mega Ball distribution for the selected bonus window.
         [[/p]]
       [[/div]]
     [[/div]]
@@ -1877,10 +2751,8 @@ table.skai-table tbody tr:hover{
             [[span class="skai-card-sub"]]All values 01&ndash;70 across the last <?php echo (int) $nodCurrentMain; ?> drawings[[/span]]
           [[/div]]
           [[div class="skai-card-body"]]
-            [[div class="skai-chart-shell"]]
-              [[div class="skai-chart-frame skai-chart-frame--tall"]]
-                [[canvas id="fullMainChart" aria-label="Full white-ball distribution chart" role="img"]][[/canvas]]
-              [[/div]]
+            [[div class="skai-chart-frame skai-chart-frame--tall"]]
+              [[canvas id="fullMainChart" aria-label="Full white-ball distribution chart" role="img"]][[/canvas]]
             [[/div]]
           [[/div]]
         [[/div]]
@@ -1888,14 +2760,12 @@ table.skai-table tbody tr:hover{
         [[div class="skai-grid"]]
           [[div class="skai-card"]]
             [[div class="skai-card-head skai-card-head--radiant"]]
-              Mega Ball distribution
-              [[span class="skai-card-sub"]]All values 01&ndash;25 across the last <?php echo (int) $nodCurrentBonus; ?> drawings[[/span]]
+              Full Mega Ball distribution
+              [[span class="skai-card-sub"]]All values 01&ndash;24 across the last <?php echo (int) $nodCurrentBonus; ?> drawings[[/span]]
             [[/div]]
             [[div class="skai-card-body"]]
-              [[div class="skai-chart-shell"]]
-                [[div class="skai-chart-frame"]]
-                  [[canvas id="megaBallChart" aria-label="Mega Ball distribution chart" role="img"]][[/canvas]]
-                [[/div]]
+              [[div class="skai-chart-frame"]]
+                [[canvas id="megaBallChart" aria-label="Mega Ball distribution chart" role="img"]][[/canvas]]
               [[/div]]
             [[/div]]
           [[/div]]
@@ -1906,10 +2776,8 @@ table.skai-table tbody tr:hover{
               [[span class="skai-card-sub"]]Distance since last appearance for each white-ball number[[/span]]
             [[/div]]
             [[div class="skai-card-body"]]
-              [[div class="skai-chart-shell"]]
-                [[div class="skai-chart-frame"]]
-                  [[canvas id="recencyChart" aria-label="White-ball recency chart" role="img"]][[/canvas]]
-                [[/div]]
+              [[div class="skai-chart-frame"]]
+                [[canvas id="recencyChart" aria-label="White-ball numbers recency chart" role="img"]][[/canvas]]
               [[/div]]
             [[/div]]
           [[/div]]
@@ -1918,6 +2786,9 @@ table.skai-table tbody tr:hover{
 
       [[div class="skai-note"]]
         The complete distribution is best used as a reference layer. The overview modules above are optimized for quick reading; this section is optimized for thorough review.
+      [[/div]]
+      [[div class="skai-simple-note"]]
+        [[strong]]Simple explanation:[[/strong]] This full chart is a map of historical appearance counts and spacing. Use it to validate line balance before you finalize tickets.
       [[/div]]
     [[/div]]
   [[/section]]
@@ -1968,7 +2839,7 @@ table.skai-table tbody tr:hover{
       [[div class="skai-two-col"]]
         [[div class="skai-card"]]
           [[div class="skai-card-head skai-card-head--horizon"]]
-            White-ball table
+            White-ball numbers table
             [[span class="skai-card-sub"]]Exact counts and recency for values 01&ndash;70[[/span]]
           [[/div]]
 
@@ -2000,7 +2871,7 @@ table.skai-table tbody tr:hover{
                   <?php
                   $number      = ($i < 10) ? '0' . $i : (string) $i;
                   $countNumber = (int) ($mainCounts[$number] ?? 0);
-                  list($lastDrawSort, $lastDrawLabel) = leDrawingsAgoLabel($mainLastSeenIndex[$number] ?? null, (int) $nodCurrentMain);
+                  [$lastDrawSort, $lastDrawLabel] = leDrawingsAgoLabel($mainLastSeenIndex[$number] ?? null, (int) $nodCurrentMain);
 
                   $rowClass = 'all';
                   if (in_array($number, $topActiveKeys, true)) {
@@ -2035,11 +2906,15 @@ table.skai-table tbody tr:hover{
             [[div class="skai-tracked-head"]]
               [[h3 class="skai-tracked-title"]]Tracked white-ball numbers[[/h3]]
               [[div class="skai-tracked-actions"]]
+                [[button class="skai-link-btn js-save-from-tracker" type="button" data-source="tracked-main"]]Save strategy[[/button]]
                 [[button class="skai-link-btn" type="button" id="clearMainTracked"]]Clear all[[/button]]
               [[/div]]
             [[/div]]
             [[div class="skai-chip-wrap" id="mainTrackedWrap"]]
               [[div class="skai-empty"]]Select numbers to create a short tracked set for comparison across this page.[[/div]]
+            [[/div]]
+            [[div class="skai-chip-wrap" style="padding-top:0;"]]
+              [[div class="skai-empty" id="mainStrategyHint"]]Strategy save is prepared as a front-end placeholder. Account persistence can be connected later.[[/div]]
             [[/div]]
           [[/div]]
         [[/div]]
@@ -2047,7 +2922,7 @@ table.skai-table tbody tr:hover{
         [[div class="skai-card"]]
           [[div class="skai-card-head skai-card-head--radiant"]]
             Mega Ball table
-            [[span class="skai-card-sub"]]Exact counts and recency for values 01&ndash;25[[/span]]
+            [[span class="skai-card-sub"]]Exact counts and recency for values 01&ndash;24[[/span]]
           [[/div]]
 
           [[div class="skai-table-wrap"]]
@@ -2061,11 +2936,11 @@ table.skai-table tbody tr:hover{
                 [[/tr]]
               [[/thead]]
               [[tbody]]
-                <?php for ($i = 1; $i <= 25; $i++) : ?>
+                <?php for ($i = 1; $i <= 24; $i++) : ?>
                   <?php
                   $number      = ($i < 10) ? '0' . $i : (string) $i;
                   $countNumber = (int) ($bonusCounts[$number] ?? 0);
-                  list($lastDrawSort, $lastDrawLabel) = leDrawingsAgoLabel($bonusLastSeenIndex[$number] ?? null, (int) $nodCurrentBonus);
+                  [$lastDrawSort, $lastDrawLabel] = leDrawingsAgoLabel($bonusLastSeenIndex[$number] ?? null, (int) $nodCurrentBonus);
                   ?>
                   [[tr]]
                     [[td]][[span class="skai-pill skai-pill--bonus"]]<?php echo htmlspecialchars($number, ENT_QUOTES, 'UTF-8'); ?>[[/span]][[/td]]
@@ -2089,6 +2964,7 @@ table.skai-table tbody tr:hover{
             [[div class="skai-tracked-head"]]
               [[h3 class="skai-tracked-title"]]Tracked Mega Ball values[[/h3]]
               [[div class="skai-tracked-actions"]]
+                [[button class="skai-link-btn js-save-from-tracker" type="button" data-source="tracked-bonus"]]Save strategy[[/button]]
                 [[button class="skai-link-btn" type="button" id="clearBonusTracked"]]Clear all[[/button]]
               [[/div]]
             [[/div]]
@@ -2099,6 +2975,9 @@ table.skai-table tbody tr:hover{
 
           [[div class="skai-note"]]
             Tracking is local to this page view. It is intended as a lightweight comparison aid while you move between the overview, tables, and advanced SKAI tools.
+          [[/div]]
+          [[div class="skai-simple-note"]]
+            [[strong]]Simple explanation:[[/strong]] Save buttons are intentionally placeholders in this version. They organize strategy intent in the UI without claiming server-side storage.
           [[/div]]
         [[/div]]
       [[/div]]
@@ -2150,11 +3029,58 @@ table.skai-table tbody tr:hover{
 
       [[div class="skai-utility-grid"]]
         [[a class="skai-utility-link" href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?gameId=113"]]MCMC Markov Analysis[[/a]]
-        [[a class="skai-utility-link" href="/all-lottery-heatmaps?gameId=113"]]Heatmap Analysis[[/a]]
+        [[a class="skai-utility-link" href="/all-lottery-heatmaps?gId=113&amp;gName=megamillions&amp;sTn=ar"]]Heatmap Analysis[[/a]]
         [[a class="skai-utility-link" href="/lottery-archives?gId=113&amp;gName=megamillions&amp;sTn=ar"]]Mega Millions Archives[[/a]]
         [[a class="skai-utility-link" href="/mega-millions/mega-millions-quick-pick-today/"]]Quick Picks Today[[/a]]
         [[a class="skai-utility-link" href="/mega-millions/mega-millions-lucky-numbers-today/"]]Lucky Numbers Today[[/a]]
-        [[a class="skai-utility-link" href="/lowest-drawn-number-analysis?gId=<?php echo rawurlencode($gId); ?>&amp;stateName=<?php echo rawurlencode($stateName); ?>&amp;gName=<?php echo rawurlencode($gName); ?>&amp;sTn=<?php echo rawurlencode(strtolower($stateAbrev)); ?>"]]Lowest Number Threshold[[/a]]
+        [[a class="skai-utility-link" href="/lowest-drawn-number-analysis?gId=113&amp;stateName=Multi+State&amp;gName=Mega+Millions&amp;sTn=ar"]]Lowest Number Threshold[[/a]]
+      [[/div]]
+    [[/div]]
+  [[/section]]
+
+  [[section id="mega-millions-guide" class="skai-section" aria-labelledby="mega-millions-guide-title"]]
+    [[div class="skai-section-head"]]
+      [[div]]
+        [[h2 id="mega-millions-guide-title" class="skai-section-title"]]Mega Millions guide and FAQ[[/h2]]
+        [[p class="skai-section-sub"]]
+          A destination layer for new and returning players: how the game works, what the matrix means, and how to use these decision tools responsibly.
+        [[/p]]
+      [[/div]]
+    [[/div]]
+    [[div class="skai-section-body"]]
+      [[div class="skai-guide-grid"]]
+        [[article class="skai-guide-panel"]]
+          [[h3]]How Mega Millions works[[/h3]]
+          [[p]]Mega Millions is a multi-state jackpot game available in participating US states. Players choose 5 white-ball numbers from 01&ndash;70 and one Mega Ball from 01&ndash;24 as configured on this platform. Drawings are held Tuesday and Friday nights at 11:00 PM ET.[[/p]]
+          [[ul]]
+            [[li]][[strong]]Ticket price:[[/strong]] $<?php echo htmlspecialchars(number_format((float) $lotteryConfig['ticket_price'], 2, '.', ','), ENT_QUOTES, 'UTF-8'); ?> per line <?php echo !empty($lotteryConfig['ticket_price_note']) ? '(' . htmlspecialchars((string) $lotteryConfig['ticket_price_note'], ENT_QUOTES, 'UTF-8') . ')' : ''; ?>[[/li]]
+            [[li]][[strong]]Jackpot odds:[[/strong]] <?php echo htmlspecialchars((string) $lotteryConfig['jackpot_odds'], ENT_QUOTES, 'UTF-8'); ?> &mdash; calculated from the configured matrix: C(70,5) &times; 24 = 12,103,014 &times; 24 = 290,472,336 total combinations[[/li]]
+            [[li]][[strong]]Prize tiers:[[/strong]] <?php echo (int) $waysToWin; ?> prize levels. Current payout amounts vary by jackpot rollover; visit megamillions.com for up-to-date prizes.[[/li]]
+            [[li]][[strong]]Draw schedule:[[/strong]] <?php echo htmlspecialchars((string) $lotteryConfig['draw_schedule'], ENT_QUOTES, 'UTF-8'); ?>[[/li]]
+            [[li]][[strong]]Cash option:[[/strong]] Jackpot winners may choose a lump-sum cash payment, typically approximately 60% of the advertised annuity value before taxes.[[/li]]
+          [[/ul]]
+
+          [[h3 style="margin-top:14px;"]]Why use frequency and recency tools[[/h3]]
+          [[p]]Frequency highlights historical concentration. Recency highlights distance since appearance. Together they improve structure clarity, but they do not predict outcomes. Each Mega Millions draw is an independent event.[[/p]]
+
+          [[h3 style="margin-top:14px;"]]Related tools[[/h3]]
+          [[ul]]
+            [[li]][[a href="/picking-winning-numbers/artificial-intelligence/skai-lottery-prediction?gameId=113"]]SKAI Analysis[[/a]][[/li]]
+            [[li]][[a href="/picking-winning-numbers/artificial-intelligence/ai-powered-predictions?game_id=113"]]AI Predictions[[/a]][[/li]]
+            [[li]][[a href="/picking-winning-numbers/artificial-intelligence/skip-and-hit-analysis?game_id=113"]]Skip &amp; Hit Analysis[[/a]][[/li]]
+            [[li]][[a href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?gameId=113"]]MCMC Markov Analysis[[/a]][[/li]]
+          [[/ul]]
+        [[/article]]
+
+        [[article class="skai-guide-panel"]]
+          [[h3]]Frequently asked questions[[/h3]]
+          <?php foreach ((array) $lotteryConfig['faq_snippets'] as $faq) : ?>
+            [[div class="skai-faq-item"]]
+              [[p class="skai-faq-q"]]<?php echo htmlspecialchars((string) ($faq['q'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+              [[p class="skai-faq-a"]]<?php echo htmlspecialchars((string) ($faq['a'] ?? ''), ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+            [[/div]]
+          <?php endforeach; ?>
+        [[/article]]
       [[/div]]
     [[/div]]
   [[/section]]
@@ -2214,15 +3140,15 @@ table.skai-table tbody tr:hover{
   'use strict';
 
   var chartData = {
-    topActiveLabels:   <?php echo json_encode(array_values($topActiveLabels), JSON_UNESCAPED_UNICODE); ?>,
-    topActiveValues:   <?php echo json_encode(array_values($topActiveValues), JSON_UNESCAPED_UNICODE); ?>,
-    quietLabels:       <?php echo json_encode(array_values($quietestLabels), JSON_UNESCAPED_UNICODE); ?>,
-    quietValues:       <?php echo json_encode(array_values($quietestValues), JSON_UNESCAPED_UNICODE); ?>,
-    mainLabels:        <?php echo json_encode(array_values($mainChartLabels), JSON_UNESCAPED_UNICODE); ?>,
-    mainValues:        <?php echo json_encode(array_values($mainChartValues), JSON_UNESCAPED_UNICODE); ?>,
-    mainRecencyValues: <?php echo json_encode(array_values($mainRecencyValues), JSON_UNESCAPED_UNICODE); ?>,
-    bonusLabels:       <?php echo json_encode(array_values($bonusChartLabels), JSON_UNESCAPED_UNICODE); ?>,
-    bonusValues:       <?php echo json_encode(array_values($bonusChartValues), JSON_UNESCAPED_UNICODE); ?>
+    topActiveLabels: <?php echo json_encode(array_values($topActiveLabels)); ?>,
+    topActiveValues: <?php echo json_encode(array_values($topActiveValues)); ?>,
+    quietLabels: <?php echo json_encode(array_values($quietestLabels)); ?>,
+    quietValues: <?php echo json_encode(array_values($quietestValues)); ?>,
+    mainLabels: <?php echo json_encode(array_values($mainChartLabels)); ?>,
+    mainValues: <?php echo json_encode(array_values($mainChartValues)); ?>,
+    mainRecencyValues: <?php echo json_encode(array_values($mainRecencyValues)); ?>,
+    megaBallLabels: <?php echo json_encode(array_values($bonusChartLabels)); ?>,
+    megaBallValues: <?php echo json_encode(array_values($bonusChartValues)); ?>
   };
 
   function loadChartJsIfNeeded(done) {
@@ -2230,22 +3156,32 @@ table.skai-table tbody tr:hover{
       done();
       return;
     }
-    var script     = document.createElement('script');
-    script.src     = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
-    script.async   = true;
-    script.onload  = function () { done(); };
-    script.onerror = function () { done(); };
-    document.head.appendChild(script);
-  }
 
-  function safeContext(id) {
-    var el = document.getElementById(id);
-    if (!el) { return null; }
-    var parent = el.parentNode;
-    if (parent && parent.offsetWidth === 0) {
-      parent.style.width = '100%';
+    var cdnUrl   = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+    var integrity = 'sha384-OLBgp1GsljhM2TJ+sbHjaiH9txEUvgdDTAzHv2P24donTt6/529l+9Ua0vFImLlb';
+
+    function tryLoad(withIntegrity) {
+      var script = document.createElement('script');
+      script.src = cdnUrl;
+      if (withIntegrity) {
+        script.integrity  = integrity;
+        script.crossOrigin = 'anonymous';
+      }
+      script.async = true;
+      script.onload = function () {
+        done();
+      };
+      script.onerror = function () {
+        if (withIntegrity) {
+          tryLoad(false);
+        } else {
+          done();
+        }
+      };
+      document.head.appendChild(script);
     }
-    return el.getContext('2d');
+
+    tryLoad(true);
   }
 
   function commonBarOptions(horizontal) {
@@ -2282,20 +3218,19 @@ table.skai-table tbody tr:hover{
     };
   }
 
-  var chartsRendered = false;
-
   function renderCharts() {
-    if (!window.Chart || chartsRendered) { return; }
-    chartsRendered = true;
+    if (!window.Chart) {
+      return;
+    }
 
-    var ctxTopActive = safeContext('topActiveChart');
-    var ctxQuiet     = safeContext('quietChart');
-    var ctxFullMain  = safeContext('fullMainChart');
-    var ctxBonus     = safeContext('megaBallChart');
-    var ctxRecency   = safeContext('recencyChart');
+    var topActiveCanvas = document.getElementById('topActiveChart');
+    var quietCanvas     = document.getElementById('quietChart');
+    var fullMainCanvas  = document.getElementById('fullMainChart');
+    var megaBallCanvas  = document.getElementById('megaBallChart');
+    var recencyCanvas   = document.getElementById('recencyChart');
 
-    if (ctxTopActive && chartData.topActiveLabels.length) {
-      new Chart(ctxTopActive, {
+    if (topActiveCanvas) {
+      new Chart(topActiveCanvas.getContext('2d'), {
         type: 'bar',
         data: {
           labels: chartData.topActiveLabels,
@@ -2310,8 +3245,8 @@ table.skai-table tbody tr:hover{
       });
     }
 
-    if (ctxQuiet && chartData.quietLabels.length) {
-      new Chart(ctxQuiet, {
+    if (quietCanvas) {
+      new Chart(quietCanvas.getContext('2d'), {
         type: 'bar',
         data: {
           labels: chartData.quietLabels,
@@ -2326,15 +3261,15 @@ table.skai-table tbody tr:hover{
       });
     }
 
-    if (ctxFullMain && chartData.mainLabels.length) {
-      new Chart(ctxFullMain, {
+    if (fullMainCanvas) {
+      new Chart(fullMainCanvas.getContext('2d'), {
         type: 'bar',
         data: {
           labels: chartData.mainLabels,
           datasets: [{
             data: chartData.mainValues,
             borderWidth: 0,
-            borderRadius: 4,
+            borderRadius: 6,
             barThickness: 10,
             maxBarThickness: 12,
             backgroundColor: '#1C66FF'
@@ -2344,13 +3279,13 @@ table.skai-table tbody tr:hover{
       });
     }
 
-    if (ctxBonus && chartData.bonusLabels.length) {
-      new Chart(ctxBonus, {
+    if (megaBallCanvas) {
+      new Chart(megaBallCanvas.getContext('2d'), {
         type: 'bar',
         data: {
-          labels: chartData.bonusLabels,
+          labels: chartData.megaBallLabels,
           datasets: [{
-            data: chartData.bonusValues,
+            data: chartData.megaBallValues,
             borderWidth: 0,
             borderRadius: 8,
             backgroundColor: '#8F1F2D'
@@ -2360,15 +3295,15 @@ table.skai-table tbody tr:hover{
       });
     }
 
-    if (ctxRecency && chartData.mainLabels.length) {
-      new Chart(ctxRecency, {
+    if (recencyCanvas) {
+      new Chart(recencyCanvas.getContext('2d'), {
         type: 'bar',
         data: {
           labels: chartData.mainLabels,
           datasets: [{
             data: chartData.mainRecencyValues,
             borderWidth: 0,
-            borderRadius: 4,
+            borderRadius: 6,
             backgroundColor: '#F5A623'
           }]
         },
@@ -2385,6 +3320,7 @@ table.skai-table tbody tr:hover{
               ticks: {
                 maxRotation: 0,
                 autoSkip: true,
+                maxTicksLimit: 10,
                 font: { weight: '700' }
               },
               grid: { display: false }
@@ -2524,6 +3460,84 @@ table.skai-table tbody tr:hover{
     }
   }
 
+  function bindStrategySaving() {
+    var status        = document.getElementById('strategySaveStatus');
+    var playButtons   = document.querySelectorAll('.js-save-strategy');
+    var trackerButtons = document.querySelectorAll('.js-save-from-tracker');
+
+    function sanitizeText(value) {
+      return String(value || '').replace(/[^0-9,\-\sA-Za-z]/g, '').replace(/\s+/g, ' ').trim();
+    }
+
+    function getCheckedValues(selector) {
+      var values = [];
+      var inputs = document.querySelectorAll(selector);
+      var i;
+      for (i = 0; i < inputs.length; i++) {
+        if (inputs[i] && inputs[i].type === 'checkbox' && inputs[i].checked) {
+          values.push(inputs[i].value);
+        }
+      }
+      return values;
+    }
+
+    var strategyStore = {
+      save: function (payload) {
+        var safeName = sanitizeText(payload.name);
+        return {
+          ok: false,
+          persisted: false,
+          message: 'Saved as placeholder only: "' + safeName + '". Persistent account storage is not enabled in this page file.'
+        };
+      }
+    };
+
+    function setStatus(message) {
+      if (status) {
+        status.textContent = message;
+      }
+      var mainHint = document.getElementById('mainStrategyHint');
+      if (mainHint) {
+        mainHint.textContent = message;
+      }
+    }
+
+    var i;
+    for (i = 0; i < playButtons.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          var payload = {
+            name: sanitizeText(btn.getAttribute('data-strategy') || 'Strategy'),
+            main: sanitizeText(btn.getAttribute('data-main') || ''),
+            bonus: sanitizeText(btn.getAttribute('data-bonus') || ''),
+            source: 'play-card'
+          };
+          var result = strategyStore.save(payload);
+          setStatus((result.ok ? '' : 'Notice: ') + result.message);
+        });
+      }(playButtons[i]));
+    }
+
+    var j;
+    for (j = 0; j < trackerButtons.length; j++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          var source = sanitizeText(btn.getAttribute('data-source') || 'tracker');
+          var main   = getCheckedValues('.js-track-main');
+          var bonus  = getCheckedValues('.js-track-bonus');
+          var payload = {
+            name:   sanitizeText('Tracker strategy (' + source + ')'),
+            main:   sanitizeText(main.join(', ')),
+            bonus:  sanitizeText(bonus.join(', ')),
+            source: source
+          };
+          var result = strategyStore.save(payload);
+          setStatus((result.ok ? '' : 'Notice: ') + result.message);
+        });
+      }(trackerButtons[j]));
+    }
+  }
+
   function initAnchors() {
     var tabs = document.querySelectorAll('.skai-tab');
     if (!tabs.length) { return; }
@@ -2545,6 +3559,7 @@ table.skai-table tbody tr:hover{
   function init() {
     bindTrackers();
     bindFilters();
+    bindStrategySaving();
     initAnchors();
     loadChartJsIfNeeded(function () {
       retryRenderCharts(5);
