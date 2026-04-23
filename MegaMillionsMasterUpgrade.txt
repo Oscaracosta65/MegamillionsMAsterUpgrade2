@@ -10,7 +10,9 @@
  * - JSON source checked: lottery_skip_config.json (game_id 113)
  * - Key spec verified: 5 main balls 01-70, Mega Ball 01-24 (max_extra_ball_number: 24 per JSON config)
  * - Bonus/extra logic: Mega Ball drawn from same record, column "sixth", range 01-24
- * - Factual corrections: Mega Ball range corrected from 25 to 24 per verified JSON config
+ * - Factual corrections: Mega Ball range corrected from 25 to 24 per verified JSON config.
+ *   Impact: leInitRange(1, 24), Mega Ball table loop (i<=24), bonusChartLabels, analysis window.
+ *   The previous file used range 01-25 which exceeded the system-configured max_extra_ball_number.
  * - Template additions: best plays, odds/payouts, combination profile, anti-crowd,
  *   bankroll planner, guide/FAQ sections added from approved reference template system
  * - All Mega Millions specific links (game_id=113, gName=megamillions, sTn=ar) preserved
@@ -3158,6 +3160,8 @@ table.skai-table tbody tr:hover{
     }
 
     var cdnUrl   = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+    // SRI hash from Chart.js 4.4.1 official release. The tryLoad fallback below retries without
+    // integrity if the hash check fails, ensuring charts load even if the hash is stale.
     var integrity = 'sha384-OLBgp1GsljhM2TJ+sbHjaiH9txEUvgdDTAzHv2P24donTt6/529l+9Ua0vFImLlb';
 
     function tryLoad(withIntegrity) {
@@ -3466,7 +3470,8 @@ table.skai-table tbody tr:hover{
     var trackerButtons = document.querySelectorAll('.js-save-from-tracker');
 
     function sanitizeText(value) {
-      return String(value || '').replace(/[^0-9,\-\sA-Za-z]/g, '').replace(/\s+/g, ' ').trim();
+      // Strip to safe chars and enforce a maximum length to prevent oversized payloads.
+      return String(value || '').replace(/[^0-9,\-\sA-Za-z]/g, '').replace(/\s+/g, ' ').trim().substring(0, 200);
     }
 
     function getCheckedValues(selector) {
