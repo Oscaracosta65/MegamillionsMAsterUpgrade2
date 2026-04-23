@@ -1013,20 +1013,21 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($schemaJs
 ?>
 [[style]]
 :root{
-  --deep-navy:#0A1A33;
   --skai-blue:#1C66FF;
-  --sky-gray:#F2F4FA;
-  --soft-slate:#6B7A99;
+  --deep-navy:#0A1A33;
+  --sky-gray:#EFEFF5;
+  --soft-slate:#7F8DAA;
   --line:rgba(10,26,51,.10);
-  --line-strong:rgba(10,26,51,.18);
-  --text:#1A2540;
-  --text-soft:#4A5568;
-  --grad-horizon:linear-gradient(135deg,#1C66FF 0%,#0A3FAD 100%);
-  --grad-radiant:linear-gradient(135deg,#7C3AED 0%,#4F46E5 100%);
-  --grad-success:linear-gradient(135deg,#059669 0%,#047857 100%);
-  --grad-ember:linear-gradient(135deg,#F5A623 0%,#E07B15 100%);
-  --grad-slate:linear-gradient(180deg,#F8FAFF 0%,#FFFFFF 100%);
-  --shadow-1:0 2px 12px rgba(10,26,51,.07);
+  --line-strong:rgba(10,26,51,.16);
+  --text:#0A1A33;
+  --text-soft:#5F6F8C;
+  --grad-horizon:linear-gradient(135deg,#0A1A33 0%,#1C66FF 100%);
+  --grad-radiant:linear-gradient(135deg,#1C66FF 0%,#7F8DAA 100%);
+  --grad-slate:linear-gradient(180deg,#EFEFF5 0%,#FFFFFF 100%);
+  --grad-success:linear-gradient(135deg,#20C997 0%,#0A1A33 100%);
+  --grad-ember:linear-gradient(135deg,#F5A623 0%,#0A1A33 100%);
+  --shadow-1:0 12px 32px rgba(10,26,51,.08);
+  --shadow-2:0 20px 48px rgba(10,26,51,.14);
 }
 
 *,::before,::after{box-sizing:border-box;}
