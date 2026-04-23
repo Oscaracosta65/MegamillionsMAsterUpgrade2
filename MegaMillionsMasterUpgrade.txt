@@ -10,11 +10,20 @@
  * - JSON source checked: lottery_skip_config.json (game_id 113)
  * - Key spec verified: 5 main balls 01-70, Mega Ball 01-24 (max_extra_ball_number: 24 per JSON config)
  * - Bonus/extra logic: Mega Ball drawn from same record, column "sixth", range 01-24
- * - Factual corrections: Mega Ball range corrected from 25 to 24 per verified JSON config.
+ * - Factual corrections from upgrade pass:
+ *   Mega Ball range corrected from 25 to 24 per verified JSON config.
  *   Impact: leInitRange(1, 24), Mega Ball table loop (i<=24), bonusChartLabels, analysis window.
  *   The previous file used range 01-25 which exceeded the system-configured max_extra_ball_number.
- * - Template additions: best plays, odds/payouts, combination profile, anti-crowd,
- *   bankroll planner, guide/FAQ sections added from approved reference template system
+ * - Logic corrections from production audit pass:
+ *   1. $quietestKeys — PHP arsort treats null as 0 in numeric comparison; null indices in
+ *      $mainLastSeenIndex (numbers never seen in the window) were ranking as "most recently seen"
+ *      instead of "quietest." Fixed by substituting null with ($nodCurrentMain + 1) before sort
+ *      so truly absent numbers correctly rank as the quietest.
+ *   2. $top50/$top300 window-shift comparison — previous code used array_slice($mainCounts, 0, 50)
+ *      which sliced by key index (numbers 01-50), not by draw count. $top300 used the full
+ *      $mainCounts (user-selected window, default 100), not 300 draws. Both now built from
+ *      actual draw rows: $subCounts50 from first 50 rows, $subCounts300 from first 300 rows.
+ *      $maxFetch always fetches at least 300 rows, so data is always available.
  * - All Mega Millions specific links (game_id=113, gName=megamillions, sTn=ar) preserved
  */
 
@@ -614,7 +623,12 @@ foreach (array_slice($rowsBonus, 0, $nodCurrentBonus) as $bIdx => $row) {
 // Overview signals
 $topN        = 10;
 $topActiveKeys   = leTopKeysByValue($mainCounts,   $topN, false);
-$quietestKeys    = leTopKeysByValue($mainLastSeenIndex, $topN, false);
+// Null-safe sort: numbers never seen in the window get sentinel value ($nodCurrentMain + 1)
+// so they correctly rank as the QUIETEST rather than mapping to 0 (most recent) in arsort.
+$quietestForSort = array_map(static function ($idx) use ($nodCurrentMain) {
+    return ($idx === null) ? ($nodCurrentMain + 1) : $idx;
+}, $mainLastSeenIndex);
+$quietestKeys    = leTopKeysByValue($quietestForSort, $topN, false);
 $mostActiveSummary = array_slice($topActiveKeys, 0, 5);
 $quietSummary      = array_slice($quietestKeys, 0, 5);
 
@@ -643,9 +657,29 @@ $mainRecencyValues = array_map(static function ($k) use ($mainLastSeenIndex, $no
 $bonusChartLabels = leBuildNaturalLabels(1, 24);
 $bonusChartValues = array_map(static function ($k) use ($bonusCounts) { return (int) ($bonusCounts[$k] ?? 0); }, $bonusChartLabels);
 
-// Window-shift comparison
-$top50  = leTopKeysByValue(array_slice($mainCounts, 0, 50, true), 5, false);
-$top300 = leTopKeysByValue($mainCounts, 5, false);
+// Window-shift comparison — proper sub-windows built from actual draw rows.
+// $maxFetch always fetches at least 300 rows so both windows are always available.
+[$subCounts50, ] = leInitRange(1, 70);
+foreach (array_slice($rowsMain, 0, 50) as $row) {
+    foreach (['first', 'second', 'third', 'fourth', 'fifth'] as $col) {
+        $ball = trim((string) ($row[$col] ?? ''));
+        if ($ball !== '' && isset($subCounts50[$ball])) {
+            $subCounts50[$ball]++;
+        }
+    }
+}
+$top50 = leTopKeysByValue($subCounts50, 5, false);
+
+[$subCounts300, ] = leInitRange(1, 70);
+foreach (array_slice($rowsMain, 0, 300) as $row) {
+    foreach (['first', 'second', 'third', 'fourth', 'fifth'] as $col) {
+        $ball = trim((string) ($row[$col] ?? ''));
+        if ($ball !== '' && isset($subCounts300[$ball])) {
+            $subCounts300[$ball]++;
+        }
+    }
+}
+$top300 = leTopKeysByValue($subCounts300, 5, false);
 
 // Draw history for the latest draw balls
 $drawHistoryRows = [];
