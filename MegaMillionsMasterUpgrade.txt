@@ -959,7 +959,17 @@ $seoIntroSecondary = 'Adjacent intent covered here: jackpot context, next draw d
 
 $heroInsight = 'Latest white-ball and Mega Ball frequency, recency, and draw context for Mega Millions — with structured analysis tools.';
 $overviewNote = 'Frequency and recency are descriptive signals, not predictors. Use the overview to orient quickly, then move to the frequency deep dive or SKAI tools for structured exploration.';
-$windowChangeNarrative = 'A shorter window weights recent behavior more heavily. A broader window smooths out recent streaks and shows longer-term distribution. Neither view predicts future outcomes — they describe different slices of the same historical record.';
+$windowChangeNarrative  = 'In the recent 50-draw view, the leading activity centers on ' . leCommaList(array_slice($top50, 0, 3)) . '. ';
+$windowChangeNarrative .= 'In the broader 300-draw view, ' . leCommaList(array_slice($top300, 0, 3)) . ' remains more historically prominent. ';
+$_shiftIn  = array_values(array_filter($top300, static function ($n) use ($top50) { return !in_array($n, $top50, true); }));
+$_shiftOut = array_values(array_filter($top50,  static function ($n) use ($top300) { return !in_array($n, $top300, true); }));
+if (!empty($_shiftIn)) {
+    $windowChangeNarrative .= leCommaList(array_slice($_shiftIn, 0, 2)) . ' gains prominence when the window broadens. ';
+}
+if (!empty($_shiftOut)) {
+    $windowChangeNarrative .= leCommaList(array_slice($_shiftOut, 0, 2)) . ' looks more concentrated in the shorter recent view.';
+}
+unset($_shiftIn, $_shiftOut);
 
 /**
  * JSON-LD Schema
@@ -1017,6 +1027,10 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($schemaJs
   --deep-navy:#0A1A33;
   --sky-gray:#EFEFF5;
   --soft-slate:#7F8DAA;
+  --success-green:#20C997;
+  --caution-amber:#F5A623;
+  --white:#FFFFFF;
+  --danger-red:#A61D2D;
   --line:rgba(10,26,51,.10);
   --line-strong:rgba(10,26,51,.16);
   --text:#0A1A33;
@@ -1028,23 +1042,42 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($schemaJs
   --grad-ember:linear-gradient(135deg,#F5A623 0%,#0A1A33 100%);
   --shadow-1:0 12px 32px rgba(10,26,51,.08);
   --shadow-2:0 20px 48px rgba(10,26,51,.14);
+  --radius-14:14px;
+  --radius-18:18px;
+  --radius-22:22px;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 }
 
 *,::before,::after{box-sizing:border-box;}
 
 .skai-page{
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  font-family:var(--font);
   color:var(--text);
   max-width:1200px;
   margin:0 auto;
   padding:20px 16px 40px;
 }
 
+.skai-page a{
+  text-decoration:none;
+}
+
+.skai-grid{
+  display:grid;
+  gap:14px;
+}
+
 .skai-hero{
-  border-radius:24px;
+  position:relative;
+  border-radius:var(--radius-22);
   overflow:hidden;
-  background:var(--grad-horizon);
-  box-shadow:0 20px 48px rgba(10,26,51,.22);
+  background:
+    radial-gradient(900px 420px at -10% -20%,rgba(255,255,255,.13) 0%,rgba(255,255,255,0) 55%),
+    radial-gradient(780px 340px at 110% 0%,rgba(255,255,255,.10) 0%,rgba(255,255,255,0) 55%),
+    var(--grad-horizon);
+  color:#fff;
+  box-shadow:var(--shadow-2);
+  border:1px solid rgba(255,255,255,.10);
   margin-bottom:0;
 }
 
@@ -1062,13 +1095,15 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($schemaJs
 .skai-logo{
   width:110px;
   height:110px;
-  border-radius:18px;
+  border-radius:20px;
   overflow:hidden;
-  background:rgba(255,255,255,.10);
+  background:rgba(255,255,255,.94);
   display:flex;
   align-items:center;
   justify-content:center;
   flex-shrink:0;
+  box-shadow:0 14px 30px rgba(0,0,0,.16);
+  padding:12px;
 }
 
 .skai-logo img{
@@ -1678,7 +1713,7 @@ $doc->addCustomTag('<script type="application/ld+json">' . json_encode($schemaJs
 
 .skai-table-wrap{
   padding:16px;
-  overflow-x:auto;
+  overflow:auto;
 }
 
 table.skai-table{
@@ -1882,7 +1917,7 @@ table.skai-table tbody tr:hover{
 
 .skai-utility-grid{
   display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-template-columns:repeat(4,minmax(0,1fr));
   gap:10px;
   margin-top:12px;
 }
@@ -1949,14 +1984,14 @@ table.skai-table tbody tr:hover{
 }
 
 .skai-faq-item{
-  border:1px solid var(--line);
-  border-radius:16px;
-  background:linear-gradient(180deg,#FFFFFF 0%,#FAFBFF 100%);
-  padding:14px 16px;
-  margin-top:0;
+  margin-top:10px;
+  padding-top:10px;
+  border-top:1px solid var(--line);
 }
 
-.skai-faq-item + .skai-faq-item{
+.skai-faq-item:first-child{
+  margin-top:0;
+  padding-top:0;
   border-top:none;
 }
 
@@ -2385,6 +2420,21 @@ table.skai-table tbody tr:hover{
             <?php endif; ?>
           [[/div]]
         [[/aside]]
+      [[/div]]
+    [[/div]]
+  [[/section]]
+
+  [[section class="skai-section" aria-labelledby="page-intro-title"]]
+    [[div class="skai-section-body"]]
+      [[div class="skai-intro-copy"]]
+        [[div]]
+          [[h2 id="page-intro-title" style="margin:0 0 10px;font-size:16px;line-height:1.3;font-weight:900;color:var(--deep-navy);"]]What this page covers[[/h2]]
+          [[p style="margin:0;font-size:14px;line-height:1.75;color:var(--text-soft);"]]<?php echo htmlspecialchars($seoIntroPrimary, ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+        [[/div]]
+        [[div]]
+          [[h3 style="margin:0 0 10px;font-size:16px;line-height:1.3;font-weight:900;color:var(--deep-navy);"]]Adjacent topics covered here[[/h3]]
+          [[p style="margin:0;font-size:14px;line-height:1.75;color:var(--text-soft);"]]<?php echo htmlspecialchars($seoIntroSecondary, ENT_QUOTES, 'UTF-8'); ?>[[/p]]
+        [[/div]]
       [[/div]]
     [[/div]]
   [[/section]]
